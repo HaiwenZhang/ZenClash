@@ -2,14 +2,27 @@
 
 use std::{sync::Arc, time::Duration};
 
-pub(crate) struct ControllerFixture {
+/// Loopback mock Mihomo HTTP controller with recorded selections, apply counts, and rule patches.
+pub struct ControllerFixture {
     pub(crate) proxy_catalog: Arc<std::sync::Mutex<serde_json::Value>>,
     pub(crate) proxy_selections: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box controller tests")
+    )]
     pub(crate) subscription_requests: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) url: String,
     pub(crate) stopped: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box controller tests")
+    )]
     pub(crate) apply_failures: Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) apply_requests: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box controller tests")
+    )]
     pub(crate) blocked_apply: Arc<std::sync::atomic::AtomicBool>,
     rule_catalog: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     rule_patches: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
@@ -18,28 +31,72 @@ pub(crate) struct ControllerFixture {
 }
 
 impl ControllerFixture {
-    pub(crate) fn set_proxy_catalog(&self, response: serde_json::Value) {
+    /// Replaces the JSON payload served for `GET /proxies` and `GET /proxies/<group>`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal proxy-catalog mutex is poisoned.
+    pub fn set_proxy_catalog(&self, response: serde_json::Value) {
         *self.proxy_catalog.lock().unwrap() = response;
     }
 
-    pub(crate) fn endpoint_url(&self) -> &str {
+    /// Returns the recorded `PUT /proxies/<group>` selection requests in arrival order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal selections mutex is poisoned.
+    #[must_use]
+    pub fn proxy_selections(&self) -> Vec<(String, serde_json::Value)> {
+        self.proxy_selections.lock().unwrap().clone()
+    }
+
+    /// Returns the number of `PUT /configs` or `PATCH /configs` requests received.
+    #[must_use]
+    pub fn apply_request_count(&self) -> usize {
+        self.apply_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Returns the loopback base URL (for example `http://127.0.0.1:<port>`).
+    #[must_use]
+    pub fn endpoint_url(&self) -> &str {
         &self.url
     }
 
-    pub(crate) fn set_rule_catalog(&self, catalog: zenclash_core::RuleCatalog) {
+    /// Installs the rule catalog served for `GET /rules`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if serialization fails or the internal rule-catalog mutex is poisoned.
+    pub fn set_rule_catalog(&self, catalog: zenclash_core::RuleCatalog) {
         *self.rule_catalog.lock().unwrap() = Some(serde_json::to_value(catalog).unwrap());
     }
 
-    pub(crate) fn rule_patches(&self) -> Vec<serde_json::Value> {
+    /// Returns all `PATCH /rules/disable` JSON payloads received by this controller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal rule-patches mutex is poisoned.
+    #[must_use]
+    pub fn rule_patches(&self) -> Vec<serde_json::Value> {
         self.rule_patches.lock().unwrap().clone()
     }
 
-    pub(crate) fn set_rule_patches_blocked(&self, blocked: bool) {
+    /// Controls whether incoming `PATCH /rules/disable` requests block until released.
+    pub fn set_rule_patches_blocked(&self, blocked: bool) {
         self.blocked_rule_patches
             .store(blocked, std::sync::atomic::Ordering::Release);
     }
 
-    pub(crate) fn new(fail_first_apply: bool) -> Self {
+    /// Starts a loopback HTTP controller thread on an ephemeral localhost port.
+    ///
+    /// When `fail_first_apply` is `true`, the first config-apply request drops without a response.
+    ///
+    /// # Panics
+    ///
+    /// Panics if binding the ephemeral localhost listener fails.
+    #[must_use]
+    pub fn new(fail_first_apply: bool) -> Self {
         use std::io::Write;
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -252,6 +309,7 @@ impl Drop for ControllerFixture {
     }
 }
 
+#[cfg(test)]
 #[test]
 fn controller_fixture_keeps_serving_after_incomplete_peer_disconnects() {
     use std::io::{Read, Write};

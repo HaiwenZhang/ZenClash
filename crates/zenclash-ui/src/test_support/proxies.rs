@@ -12,6 +12,10 @@ use zenclash_core::{
     ControlledConfigStore, CoreKind, CoreSession, MihomoClient, MihomoEndpoint, ProxyGroupBehavior,
 };
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "used by internal white-box proxy pause tests")
+)]
 enum ProxyResponsePause {
     WorkspaceCatalog,
     SelectionReadback,
@@ -30,47 +34,81 @@ impl ProxyResponsePause {
     }
 }
 
-pub(crate) struct ProxyConfigurationFixture {
+/// Owned loopback proxy controller, Tokio runtime, `CoreSession`, and isolated config store.
+pub struct ProxyConfigurationFixture {
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) session: CoreSession,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box proxy tests")
+    )]
     pub(crate) store: ControlledConfigStore,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box proxy tests")
+    )]
     pub(crate) paused_request_started: Option<tokio::sync::oneshot::Receiver<()>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box proxy tests")
+    )]
     pub(crate) release_response: Option<tokio::sync::oneshot::Sender<()>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box proxy tests")
+    )]
     fail_selection_readback: Arc<AtomicBool>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box proxy tests")
+    )]
     fail_workspace_reads: Arc<AtomicBool>,
     server: tokio::task::JoinHandle<()>,
     root: PathBuf,
 }
 
 impl ProxyConfigurationFixture {
+    #[cfg(test)]
     pub(crate) fn fail_workspace_reads(&self) {
         self.fail_workspace_reads.store(true, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(crate) fn fail_selection_readback(&self) {
         self.fail_selection_readback.store(true, Ordering::Release);
     }
 
-    pub(crate) fn new() -> Self {
+    /// Creates a loopback proxy controller serving default selector groups (`group`, `other`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if creating the temporary fixture directory, Tokio runtime, or loopback listener fails.
+    #[must_use]
+    pub fn new() -> Self {
         Self::with_response_pause(None)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_first_catalog_paused() -> Self {
         Self::with_response_pause(Some(ProxyResponsePause::WorkspaceCatalog))
     }
 
+    #[cfg(test)]
     pub(crate) fn with_first_selection_readback_paused() -> Self {
         Self::with_response_pause(Some(ProxyResponsePause::SelectionReadback))
     }
 
+    #[cfg(test)]
     pub(crate) fn with_first_selection_acknowledgement_paused() -> Self {
         Self::with_response_pause(Some(ProxyResponsePause::SelectionAcknowledgement))
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_group() -> Self {
         Self::with_controller_state(None, ProxyGroupBehavior::Automatic { fixed: true })
     }
 
+    #[cfg(test)]
     pub(crate) fn with_group_delay_paused() -> Self {
         Self::with_controller_state(
             Some(ProxyResponsePause::GroupDelay),
@@ -193,6 +231,12 @@ impl ProxyConfigurationFixture {
     }
 }
 
+impl Default for ProxyConfigurationFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for ProxyConfigurationFixture {
     fn drop(&mut self) {
         self.server.abort();
@@ -201,7 +245,12 @@ impl Drop for ProxyConfigurationFixture {
     }
 }
 
-pub(crate) fn open_session_page_window(
+/// Opens a headless GPUI `Root` window hosting a `ProxiesPage` wired to `fixture`.
+///
+/// # Panics
+///
+/// Panics if the headless window fails to initialize the view entity.
+pub fn open_session_page_window(
     cx: &mut gpui_kit::TestAppContext,
     fixture: &ProxyConfigurationFixture,
 ) -> (
@@ -253,11 +302,16 @@ pub(crate) async fn wait_for_page_state(
     }
 }
 
+/// Opens a `ProxiesPage` window, triggers an initial catalog refresh, and waits until settled.
+///
+/// # Panics
+///
+/// Panics if the catalog does not finish loading within 10 seconds or reports a load error.
 #[expect(
     clippy::future_not_send,
     reason = "GPUI test window setup retains its foreground-thread context"
 )]
-pub(crate) async fn open_ready_session_page_window(
+pub async fn open_ready_session_page_window(
     cx: &mut gpui_kit::TestAppContext,
     fixture: &ProxyConfigurationFixture,
 ) -> (
@@ -274,12 +328,36 @@ pub(crate) async fn open_ready_session_page_window(
     (window, page)
 }
 
+/// Returns `true` when `page` has loaded a proxy catalog without a current error.
+#[must_use]
+pub fn has_loaded_catalog(
+    cx: &mut gpui_kit::TestAppContext,
+    page: &gpui_kit::Entity<crate::features::proxies::ProxiesPage>,
+) -> bool {
+    cx.update(|cx| page.read(cx).catalog.is_some() && page.read(cx).error.is_none())
+}
+
+/// Returns the current error message recorded by `page`, if any.
+#[must_use]
+pub fn catalog_error(
+    cx: &mut gpui_kit::TestAppContext,
+    page: &gpui_kit::Entity<crate::features::proxies::ProxiesPage>,
+) -> Option<String> {
+    cx.update(|cx| page.read(cx).error.clone())
+}
+
 use crate::features::proxies::{ProxiesPage, presentation};
 use gpui_kit::component::Root;
 use gpui_kit::px;
 use gpui_kit::{AnyWindowHandle, AppContext, Entity, TestAppContext, size};
 use zenclash_core::ProxyCatalog;
-pub(crate) fn open_catalog(
+
+/// Opens a headless `ProxiesPage` window pre-populated with an in-memory `ProxyCatalog`.
+///
+/// # Panics
+///
+/// Panics if constructing the Tokio runtime or dummy client fails.
+pub fn open_catalog(
     cx: &mut TestAppContext,
     catalog: ProxyCatalog,
 ) -> (
@@ -290,7 +368,12 @@ pub(crate) fn open_catalog(
     open_catalog_at(cx, catalog, size(px(1200.), px(1000.)))
 }
 
-pub(crate) fn open_catalog_at(
+/// Opens a headless `ProxiesPage` window of `dimensions` pre-populated with `catalog`.
+///
+/// # Panics
+///
+/// Panics if constructing the Tokio runtime or dummy client fails.
+pub fn open_catalog_at(
     cx: &mut TestAppContext,
     catalog: ProxyCatalog,
     dimensions: gpui_kit::Size<gpui_kit::Pixels>,

@@ -10,7 +10,7 @@ type ChangeHandler = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
 
 /// Product presentation over the framework's controlled switch behavior.
 #[derive(IntoElement)]
-pub(crate) struct MintSwitch {
+pub struct MintSwitch {
     id: ElementId,
     label: SharedString,
     checked: bool,
@@ -19,7 +19,9 @@ pub(crate) struct MintSwitch {
 }
 
 impl MintSwitch {
-    pub(crate) fn new(id: impl Into<ElementId>) -> Self {
+    /// Creates an unchecked, enabled switch with the given stable `ElementId`.
+    #[must_use]
+    pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
             label: "".into(),
@@ -29,24 +31,30 @@ impl MintSwitch {
         }
     }
 
-    pub(crate) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+    /// Sets the accessible label announced for this switch.
+    #[must_use]
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = label.into();
         self
     }
 
-    pub(crate) fn checked(mut self, checked: bool) -> Self {
+    /// Sets the controlled checked state.
+    #[must_use]
+    pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
     }
-    pub(crate) fn disabled(mut self, disabled: bool) -> Self {
+
+    /// Sets whether pointer and keyboard activation are disabled.
+    #[must_use]
+    pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    pub(crate) fn on_click(
-        mut self,
-        handler: impl Fn(&bool, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    /// Registers the handler invoked with the requested next boolean state.
+    #[must_use]
+    pub fn on_click(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self
     }

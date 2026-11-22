@@ -216,7 +216,7 @@ impl PageObservationOwner {
         self.snapshot.configuration_generation = generation;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn replace_fixture_data(&mut self, data: PageSnapshotData) {
         self.snapshot.data = data;
     }
@@ -226,7 +226,7 @@ impl PageObservationOwner {
         self.snapshot.source = source;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn set_fixture_generation(&mut self, generation: u64) {
         self.snapshot.configuration_generation = generation;
     }

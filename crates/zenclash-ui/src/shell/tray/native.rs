@@ -412,5 +412,42 @@ const fn right_click_action() -> Option<TrayClick> {
     Some(TrayClick::ShowMenu)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn build_menu_commands_for_test(
+    state: &TrayMenuState,
+) -> Result<std::collections::HashMap<String, TrayCommand>, String> {
+    build_menu(state).map(|(_menu, commands)| commands)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct TrayCommandBindingsForTest(TrayCommandBindings);
+
+#[cfg(any(test, feature = "test-support"))]
+impl TrayCommandBindingsForTest {
+    pub(crate) fn new(
+        commands: std::collections::HashMap<String, TrayCommand>,
+        observation: Option<zenclash_core::CoreObservationIdentity>,
+    ) -> Self {
+        Self(TrayCommandBindings::new(commands, observation))
+    }
+
+    pub(crate) fn update_observation(
+        &mut self,
+        observation: Option<zenclash_core::CoreObservationIdentity>,
+    ) {
+        self.0.update_observation(observation);
+    }
+
+    pub(crate) fn resolve_command(
+        &self,
+        id: &str,
+    ) -> Option<(TrayCommand, Option<zenclash_core::CoreObservationIdentity>)> {
+        match self.0.resolve(id)? {
+            TrayEvent::Command(command, observation) => Some((command, observation)),
+            TrayEvent::Click(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

@@ -11,7 +11,8 @@ use std::{
     time::Duration,
 };
 
-pub(crate) struct ResourceActionController {
+/// Loopback mock controller serving provider, ruleset, and configuration endpoints.
+pub struct ResourceActionController {
     pub(crate) url: String,
     requests: Arc<Mutex<Vec<String>>>,
     stopped: Arc<AtomicBool>,
@@ -20,7 +21,13 @@ pub(crate) struct ResourceActionController {
 }
 
 impl ResourceActionController {
-    pub(crate) fn new(provider_label: &str) -> Self {
+    /// Starts a loopback resource controller serving a proxy provider named `provider_label`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if binding the ephemeral localhost listener fails.
+    #[must_use]
+    pub fn new(provider_label: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -114,11 +121,24 @@ impl ResourceActionController {
         }
     }
 
-    pub(crate) fn fail_catalog_reads(&self) {
+    /// Returns the loopback base URL of this controller.
+    #[must_use]
+    pub fn endpoint_url(&self) -> &str {
+        &self.url
+    }
+
+    /// Forces subsequent `GET /providers/proxies` requests to return HTTP 503.
+    pub fn fail_catalog_reads(&self) {
         self.fail_catalog_reads.store(true, Ordering::Release);
     }
 
-    pub(crate) fn requests(&self) -> Vec<String> {
+    /// Returns all HTTP request lines received by this controller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal request log mutex is poisoned.
+    #[must_use]
+    pub fn requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
 }

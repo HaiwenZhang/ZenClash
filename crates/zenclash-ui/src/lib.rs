@@ -17,8 +17,9 @@ pub mod runtime_host;
 /// Layer 4: desktop shell, window lifecycle, background controllers, and native tray.
 pub mod shell;
 
-#[cfg(test)]
-pub(crate) mod test_support;
+/// Unified isolated UI integration test fixtures (only enabled under tests or `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use foundation::{actions, assets, design};
 pub use shell::app;

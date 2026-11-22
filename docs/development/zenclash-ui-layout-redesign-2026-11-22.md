@@ -68,90 +68,98 @@ crates/zenclash-ui/
     └── ui_shell/                         # 【Tier 3】feature = "test-support"：整壳跨页端到端流测试（App + Tray + Service TUN）
 ```
 
-### 2.2 五层内部完整映射表
+### 2.2 五层内部完整映射表（已落地结构）
 
 ```text
 src/
-├── main.rs                               # 原 main.rs（调用 shell::platform::startup_failure）
-├── lib.rs                                # 声明 5 层 + test_support；保留必要 pub use 兼容导出（actions/app/assets/components/design/pages/tray）
+├── main.rs                               # 极薄二进制入口（调用 shell::platform::startup_failure）
+├── lib.rs                                # 声明 5 层 + test_support；保留兼容导出（actions/assets/design -> foundation；app/tray -> shell）
 │
-├── foundation/                           # Layer 0（仅依赖 gpui-kit / zenclash-core / zenclash-app / zenclash-i18n）
-│   ├── design.rs                         # 原 design.rs（ZenClash 语义色板、Surface 令牌、WCAG AA 对比度与主题切换）
-│   ├── assets.rs                         # 原 assets.rs（内嵌 SVG 与品牌图标资源）
-│   ├── actions.rs                        # 原 actions.rs（全局 GPUI actions!、Page 枚举与导航元数据）
-│   └── primitives/                       # 收拢原顶层 3 个胶水文件
-│       ├── preference_previews.rs        # 原 preference_previews.rs（菜单偏好未决预览值对象）
-│       ├── runtime_read_source.rs        # 原 runtime_read_source.rs（CoreSession 读观测身份锚定）
-│       └── proxy_selection.rs            # 原 proxy_selection.rs（Home 与 Proxies 共享的代理选择状态机）
+├── foundation.rs + foundation/           # Layer 0（仅依赖 gpui-kit / zenclash-core / zenclash-app / zenclash-i18n）
+│   ├── design.rs + design/tests.rs       # ZenClash 语义色板、Surface 令牌、WCAG AA 对比度与主题切换
+│   ├── assets.rs                         # 内嵌 SVG 与品牌图标资源
+│   ├── actions.rs                        # 全局 GPUI actions!、Page 枚举与导航元数据
+│   └── primitives.rs + primitives/       # 收拢原顶层 3 个胶水文件
+│       ├── preference_previews.rs        # 菜单偏好未决预览值对象
+│       ├── runtime_read_source.rs        # CoreSession 读观测身份锚定
+│       └── proxy_selection.rs + proxy_selection/tests.rs # Home 与 Proxies 共享的代理选择状态机
 │
-├── components/                           # Layer 1（仅依赖 foundation；严禁依赖 runtime_host / features / shell）
+├── components.rs + components/           # Layer 1（仅依赖 foundation；严禁依赖 runtime_host / features / shell）
 │   ├── surface.rs                        # 统一表面原语（Card / Section / Banner / Inset）
-│   ├── sidebar.rs                        # 全局可折叠导航侧栏
+│   ├── sidebar.rs + sidebar/tests.rs     # 全局可折叠导航侧栏
 │   ├── feedback.rs                       # FeedbackNotifications（通知去重与语义等级）
 │   ├── mint_switch.rs                    # 主题切换开关控件
-│   ├── wave_percentage.rs                # 订阅用量波浪百分比指示器
+│   ├── wave_percentage.rs + wave_percentage/tests.rs # 订阅用量波浪百分比指示器
 │   ├── workspace.rs                      # 通用页面工作区骨架
-│   └── page_primitives.rs                # 抽离自原 pages/runtime/common.rs（setting_card / info_row / metric / empty_state / list_page / format_*）
+│   ├── page_primitives.rs + page_primitives/zoom_tests.rs # 抽离自原 common.rs（setting_card / info_row / metric / empty_state / format_*）
+│   └── form_primitives.rs + form_primitives/{choice.rs, tests.rs} # 通用表单原语与选项控件（抽离自原 settings/forms.rs）
 │
-├── runtime_host/                         # Layer 2（仅依赖 foundation, components）
-│   ├── services.rs                       # 原 RuntimePageServices + RuntimeMonitors + ShellPresentationState 契约定义
-│   ├── observation.rs + observation/     # 原 pages/runtime/page_observation/（统一页级快照拉取、generation 防陈旧与取消）
-│   ├── task_token.rs                     # 原 pages/runtime/page_task.rs（页面异步任务代际令牌）
-│   ├── busy.rs                           # 原 pages/runtime/busy.rs（变更互斥与忙碌状态机）
-│   ├── feedback.rs                       # 原 pages/runtime/feedback.rs（错误/成功横幅与 Toast 协调）
-│   ├── config_inputs.rs + config_inputs/ # 原 pages/runtime/config_inputs/（拆分 1,275L 为 state.rs / sync.rs / validation.rs / host.rs）
-│   └── lifecycle.rs + lifecycle/         # 原 pages/runtime/lifecycle/（拆分 1,545L 为 visibility.rs / schedule.rs / live_loop.rs / subscriptions.rs）
+├── runtime_host.rs + runtime_host/       # Layer 2（仅依赖 foundation, components）
+│   ├── services.rs                       # RuntimePageServices + RuntimeMonitors + ShellPresentationState 契约定义
+│   ├── busy.rs                           # 变更互斥与忙碌状态机
+│   ├── task_token.rs                     # 页面异步任务代际令牌
+│   ├── lifecycle_schedule.rs             # 页级轮询与刷新调度节律
+│   ├── config_inputs.rs + config_inputs/ # Wave 2 拆分（1,275L → codec / core / fields / read_identity / read_state / sections + tests）
+│   └── observation.rs + observation/     # 统一页级快照拉取、generation 防陈旧与取消
+│       ├── observation_time.rs
+│       ├── read.rs
+│       ├── snapshot_data.rs
+│       ├── tests.rs
+│       └── readers.rs + readers/{connections,home,mihomo,network,profiles,resources,rules,settings,system_proxy,tun}.rs
 │
-├── features/                             # Layer 3（仅依赖 L0–L2；同层 Feature 严禁互相引用内部实现！）
-│   ├── host.rs + host/                   # 薄页面宿主 RuntimePage（原 pages/runtime.rs + view.rs，仅负责路由分发与共享状态挂载）
-│   ├── home.rs + home/                   # 仪表盘首页（拆分 2,483L home.rs 为 state / transitions / cards / dashboard / selector / traffic / proxy_selection）
-│   ├── proxies.rs + proxies/             # 原 pages/proxies/（独立 Entity<ProxiesPage>，拆分 1,263L view.rs 为 header / group_list / detail）
-│   ├── profiles.rs + profiles/           # 原 pages/runtime/profiles/（拆分 1,055L view/catalog.rs 为 cards / actions_menu / empty）
-│   ├── overrides.rs + overrides/         # 原 pages/runtime/overrides/
-│   ├── connections.rs + connections/     # 原 pages/runtime/connections/（独立 Entity<ConnectionsView>，拆分 1,176L dashboard.rs）
-│   ├── rules.rs + rules/                 # 原 pages/runtime/rules/（独立 Entity<RulesView>，拆分 1,095L dashboard.rs）
-│   ├── traffic.rs + traffic/             # 原 pages/runtime/traffic/
-│   ├── logs.rs + logs/                   # 原 pages/runtime/logs/（独立 Entity<LogsView>）
-│   ├── network.rs + network/             # 原 pages/runtime/network/（拆分 1,185L network.rs 为 probes / diagnostics / ai / dialogs）
-│   ├── resources.rs + resources/         # 原 pages/runtime/resources/（规则集、GeoData 与 Provider 操作）
-│   ├── capture.rs + capture/             # 归口原 system_proxy/ + tun/（系统代理与 TUN 两大捕获路径同域管理）
-│   │   ├── system_proxy.rs + system_proxy/
-│   │   └── tun.rs + tun/
-│   ├── kernel.rs + kernel/               # 归口原 mihomo/ + dns.rs + sniffer.rs（内核运行态、DNS、嗅探器配置同域管理）
-│   │   ├── mihomo.rs + mihomo/
+├── features.rs + features/               # Layer 3（仅依赖 L0–L2；兄弟 Feature 严禁互相引用内部实现！）
+│   ├── host.rs + host/                   # 页面路由宿主 RuntimePage（仅 host 允许聚合各兄弟 Feature）
+│   │   ├── view.rs / feedback.rs / form_helpers.rs / config_inputs.rs
+│   │   ├── lifecycle.rs + lifecycle/{config_apply.rs, live_loop.rs, page_loading.rs, tests.rs, ui_tests.rs} # Wave 2 拆分 1,545L
+│   │   └── ui_tests.rs + ui_tests/{service_tun.rs, service_maintenance.rs, tray_receipts.rs, design_validation.rs}
+│   ├── home.rs + home/                   # 仪表盘首页（Wave 2 拆分 2,483L → cards / controls / dashboard / menu_size / proxy_selection / selector / status / traffic / transitions / validation）
+│   ├── proxies.rs + proxies/             # 独立 Entity<ProxiesPage>（Wave 2 拆分 1,263L view.rs → view.rs + view/{inspector, proxy_card}.rs；含 actions / catalog_runtime / measurement / node_grid / presentation / selection）
+│   ├── profiles.rs + profiles/           # 配置库（Wave 2 拆分 1,055L view/catalog.rs → catalog.rs + catalog/{card, presentation}.rs；含 actions / library / state / workflow / yaml_editor / view/{editor, forms}.rs）
+│   ├── overrides.rs + overrides/         # YAML 覆写（diff_view / model / store_actions）
+│   ├── connections.rs + connections/     # 独立 Entity<ConnectionsView>（Wave 2 拆分 1,176L dashboard.rs → dashboard.rs + dashboard/{detail, summary}.rs；含 page_integration / projection / timeline）
+│   ├── rules.rs + rules/                 # 独立 Entity<RulesView>（Wave 2 拆分 1,095L dashboard.rs → dashboard.rs + dashboard/{details, table}.rs；含 page_integration / projection）
+│   ├── traffic.rs + traffic/             # 流量分析（actions / model / query_presentation / view）
+│   ├── logs.rs + logs/                   # 独立 Entity<LogsView>（dashboard / dialogs / export / page_integration / projection）
+│   ├── network.rs + network/             # 网络诊断（Wave 2 拆分 1,185L network.rs → network.rs + {actions, ai, diagnostic_query, dialogs, latency_view, model, probes_view}.rs）
+│   ├── resources.rs + resources/         # 规则集、GeoData 与 Provider 操作（action_context / builtin_actions / provider_actions / ruleset / state）
+│   ├── capture.rs + capture/             # 归口系统代理与 TUN 两大捕获路径
+│   │   ├── system_proxy.rs + system_proxy/{actions.rs, view.rs, ui_tests.rs}
+│   │   └── tun.rs + tun/{maintenance.rs, service.rs}
+│   ├── kernel.rs + kernel/               # 归口内核运行态、DNS、嗅探器配置
+│   │   ├── mihomo.rs + mihomo/{maintenance.rs, release_list.rs, ui_tests.rs}
 │   │   ├── dns.rs
 │   │   └── sniffer.rs
-│   └── settings.rs + settings/           # 原 pages/runtime/settings/ + preferences.rs（偏好设置、内核管理、备份恢复、更新与法务）
+│   └── settings.rs + settings/           # 偏好设置、内核管理、备份恢复、应用更新与法务（app_update / backup / core_management / legal / preferences）
 │
-├── shell/                                # Layer 4（仅依赖 L0–L3；应用外壳组装层，严禁写具体页面业务逻辑）
-│   ├── app.rs                            # 原 app.rs（ZenClashApp 根实体：仅组合窗口、Sidebar、Feature 与 Tray）
-│   ├── bootstrap.rs                      # 原 app/bootstrap.rs（init / create_main_window_* / reopen_main_window）
-│   ├── view.rs                           # 原 app/view.rs（主窗口 Chrome、标题栏、Sidebar 与内容区装配）
-│   ├── window.rs                         # 原 app/window.rs（窗口尺寸、隐藏托盘、关闭拦截）
-│   ├── actions.rs                        # 原 app/actions.rs（全局快捷键与 Action 分发）
-│   ├── navigation.rs                     # 原 app/navigation.rs（页面切换协调）
-│   ├── controllers/                      # 应用级后台协调器（彻底删除废弃空目录 wifi/）
-│   │   ├── automatic.rs                  # 原 app/automatic.rs
-│   │   ├── outbound_mode.rs              # 原 app/outbound_mode.rs
-│   │   ├── preferences.rs                # 原 app/preferences.rs
-│   │   ├── menu_preferences.rs           # 原 app/menu_preferences.rs
-│   │   ├── profile_updates.rs            # 原 app/profile_updates.rs
-│   │   └── system_proxy.rs               # 原 app/system_proxy.rs
-│   ├── tray.rs + tray/                   # 统一收拢原顶层 src/tray/ 与 src/app/tray/！
-│   │   ├── native.rs + native/           # 原 src/tray/{icon,menu,command_bindings,macos}.rs（纯 OS 托盘驱动）
-│   │   ├── controller.rs                 # 原 app/tray.rs + app/tray/queue.rs
-│   │   ├── commands.rs                   # 原 app/tray/commands.rs + proxy_commands.rs + directories.rs
-│   │   └── refresh.rs                    # 原 app/tray/refresh.rs + runtime_observation.rs
-│   └── platform.rs + platform/           # 原 app/platform.rs（打开目录等）+ startup_failure.rs（启动失败原生弹窗）
+├── shell.rs + shell/                     # Layer 4（仅依赖 L0–L3；应用外壳组装层，严禁写具体页面业务逻辑）
+│   ├── app.rs                            # ZenClashApp 根实体：仅组合窗口、Sidebar、Feature 与 Tray
+│   ├── bootstrap.rs                      # init / create_main_window_* / reopen_main_window
+│   ├── view.rs + view/tests.rs           # 主窗口 Chrome、标题栏、Sidebar 与内容区装配
+│   ├── window.rs + window/tests.rs       # 窗口尺寸、隐藏托盘、关闭拦截
+│   ├── actions.rs                        # 全局快捷键与 Action 分发
+│   ├── navigation.rs                     # 页面切换协调
+│   ├── controllers.rs + controllers/     # 应用级后台协调器（已彻底删除废弃空目录 wifi/）
+│   │   ├── automatic.rs
+│   │   ├── outbound_mode.rs
+│   │   ├── preferences.rs
+│   │   ├── menu_preferences.rs + menu_preferences/tests.rs
+│   │   ├── profile_updates.rs
+│   │   └── system_proxy.rs + system_proxy/tests.rs
+│   ├── tray.rs + tray/                   # 统一收拢原顶层 src/tray/ 与 src/app/tray/
+│   │   ├── native.rs + native/{icon.rs, menu.rs, command_bindings, macos.rs, tests.rs} # 纯 OS 托盘驱动
+│   │   ├── controller.rs / queue.rs
+│   │   ├── commands.rs / proxy_commands / directories
+│   │   └── refresh / runtime_observation
+│   └── platform.rs + platform/           # 平台目录操作 + startup_failure.rs + startup_failure/tests.rs
 │
-└── test_support/                         # 统一测试夹具（#[cfg(any(test, feature = "test-support"))]）
-    ├── controller.rs                     # 原 pages/runtime/test_support/controller_fixture.rs（Mock Mihomo Controller）
-    ├── owned_cores.rs                    # 原 pages/runtime/test_support/owned_cores.rs
-    ├── runtime_host.rs                   # 原 pages/runtime/test_support/runtime_page_fixture.rs
-    ├── service_workflow.rs               # 原 pages/runtime/test_support/service_workflow.rs
-    ├── proxies.rs                        # 原 pages/proxies/test_support.rs
-    ├── resources.rs                      # 原 pages/runtime/resources/test_support.rs
-    └── shell_tray.rs                     # 原 app/test_support.rs + app/tray/test_support.rs
+└── test_support.rs + test_support/       # 统一测试夹具（#[cfg(any(test, feature = "test-support"))]）
+    ├── controller.rs                     # Mock Mihomo Controller
+    ├── owned_cores.rs                    # 受管内核生命周期夹具
+    ├── runtime_host.rs                   # RuntimePage 测试宿主夹具
+    ├── service_workflow.rs               # 提权服务工作流夹具
+    ├── proxies.rs                        # ProxiesPage 目录与测速夹具
+    ├── resources.rs                      # Resources/GeoData 操作夹具
+    └── shell_tray.rs                     # Shell 与 Tray 集成夹具
 ```
 
 ### 2.3 渐进式消除 `RuntimePage` 上帝对象（两阶段策略）
@@ -184,28 +192,28 @@ src/
    - `src/**` 白盒单元测试原则上只使用 `#[test]` / `#[tokio::test]`（以及极少数必须访问私有状态的纯 `TestAppContext` 状态机单元测试，**不创建完整无头窗口**）。
    - 禁止在单元测试模块中使用 `use gpui_kit::*;`（避免 GPUI 的 `test` 宏遮蔽标准库 `#[test]`，遵循 `gpui-kit/references/gpui/test.md`）。
 
-### 3.2 首批超大生产文件内联测试剥离清单（共 16 个核心目标）
+### 3.2 Wave 2 超大生产文件拆分与内联测试剥离落地清单
 
-| 现有生产文件 | 当前行数 | 内联测试行数（占比） | 拆离目标 |
+| 原生产文件 | 拆分前行数 | 内联测试行数（占比） | 已落地拆离与子模块拆分目标 |
 | --- | ---: | ---: | --- |
-| `pages/runtime/home.rs` | 2,483 | 648 行（26%） | `features/home/tests.rs` + 拆分生产代码为 `state`/`transitions`/`cards` |
+| `pages/runtime/home.rs` | 2,483 | 648 行（26%） | `features/home/tests.rs` + 拆分为 `home.rs`、`cards.rs`、`controls.rs`、`dashboard.rs`、`status.rs`、`transitions.rs`、`validation.rs` |
 | `pages/runtime/home/selector.rs` | 911 | 300 行（32%） | `features/home/selector/tests.rs` |
 | `app/view.rs` | 795 | 299 行（37%） | `shell/view/tests.rs` |
-| `pages/runtime/config_inputs.rs` | 1,275 | 245 行（19%） | `runtime_host/config_inputs/tests.rs` |
+| `pages/runtime/config_inputs.rs` | 1,275 | 245 行（19%） | `runtime_host/config_inputs/tests.rs` + 拆分为 `codec.rs`、`core.rs`、`fields.rs`、`read_identity.rs`、`read_state.rs`、`sections.rs` |
 | `pages/runtime/rules/projection.rs` | 378 | 227 行（60%） | `features/rules/projection/tests.rs` |
-| `pages/runtime/connections.rs` | 870 | 201 行（23%） | `features/connections/tests.rs` |
+| `pages/runtime/connections.rs` | 870 | 201 行（23%） | `features/connections/tests.rs`（同步拆分 `connections/dashboard.rs` → `dashboard/{detail, summary}.rs`） |
 | `components/sidebar.rs` | 537 | 198 行（36%） | 逻辑单测 -> `components/sidebar/tests.rs`；无头交互 -> `tests/ui_components/` |
 | `pages/runtime/home/traffic.rs` | 362 | 174 行（48%） | `features/home/traffic/tests.rs` |
-| `pages/proxies/actions.rs` | 633 | 169 行（26%） | `features/proxies/actions/tests.rs` |
-| `pages/runtime/network/model.rs` | 330 | 162 行（49%） | `features/network/model/tests.rs` |
+| `pages/proxies/actions.rs` | 633 | 169 行（26%） | `features/proxies/actions/tests.rs`（同步拆分 `proxies/view.rs` → `view/{inspector, proxy_card}.rs`） |
+| `pages/runtime/network/model.rs` | 330 | 162 行（49%） | `features/network/model/tests.rs`（同步拆分 `network.rs` → `{actions, dialogs, latency_view, probes_view}.rs`） |
 | `app/system_proxy.rs` | 302 | 159 行（52%） | `shell/controllers/system_proxy/tests.rs` |
 | `startup_failure.rs` | 277 | 150 行（54%） | `shell/platform/startup_failure/tests.rs` |
 | `design.rs` | 424 | 147 行（34%） | `foundation/design/tests.rs` |
-| `pages/runtime/lifecycle.rs` | 1,545 | 136 行（8%） | `runtime_host/lifecycle/tests.rs` |
+| `pages/runtime/lifecycle.rs` | 1,545 | 136 行（8%） | `features/host/lifecycle/tests.rs` + 拆分为 `lifecycle/{config_apply, live_loop, page_loading}.rs`（调度节律归口至 `runtime_host/lifecycle_schedule.rs`） |
 | `pages/runtime/connections/timeline.rs` | 252 | 133 行（52%） | `features/connections/timeline/tests.rs` |
-| `pages/runtime/profiles/state.rs` | 484 | 131 行（27%） | `features/profiles/state/tests.rs` |
+| `pages/runtime/profiles/state.rs` | 484 | 131 行（27%） | `features/profiles/state/tests.rs`（同步拆分 `profiles/view/catalog.rs` → `catalog/{card, presentation}.rs`） |
 
-> 同步处理其余 5 个 >80 行内联测试文件（`traffic/view.rs` 120L、`connections/projection.rs` 106L、`components/wave_percentage.rs` 103L、`settings/forms.rs` 91L、`tray.rs` 87L），实现全 crate 生产文件内联测试均 <= 80 行。
+> 同步完成其余 5 个 >80 行内联测试剥离与超大视图拆分：`features/traffic/view/tests.rs`（120L）、`features/connections/projection/tests.rs`（106L）、`components/wave_percentage/tests.rs`（103L）、`components/form_primitives/tests.rs`（原 `settings/forms.rs` 91L）、`shell/tray/native/tests.rs`（原 `tray.rs` 87L），以及 `features/rules/dashboard.rs` → `dashboard/{details, table}.rs`，全 crate 生产文件内联测试均控制在 <= 80 行。
 
 ---
 
@@ -219,31 +227,25 @@ src/
 crates/zenclash-ui/tests/
 ├── ui_components/                         # 【Tier 1】默认特性即跑（零 Core/Tokio，秒级验证视觉控件与键盘可访问性）
 │   ├── main.rs
-│   ├── theme_and_surface.rs               # Light/Dark 主题切换、Surface 层次与设计令牌渲染
+│   ├── theme_and_surface.rs               # Light/Dark 主题切换、Surface 层次、剪贴板复制与 WCAG AA 对比度
 │   ├── sidebar_navigation.rs              # Sidebar 折叠展开、导航 Action 派发、模式切换按钮
-│   └── controls.rs                        # MintSwitch / WavePercentage / FeedbackNotifications 无头交互
+│   └── controls.rs                        # MintSwitch / WavePercentage / FeedbackNotifications / Workspace 无头交互
 │
-├── ui_features/                           # 【Tier 2】required-features = ["test-support"]（单页面完整无头窗口流）
+├── ui_features/                           # 【Tier 2】required-features = ["test-support"]（单页面黑盒无头窗口流）
 │   ├── main.rs
-│   ├── home.rs                            # 迁出原 home/ui_tests.rs（首页流量卡、捕获开关、快速代理切换）
-│   ├── proxies.rs                         # 迁出原 proxies/tests.rs 中的无头窗口交互流（1,663L 按场景拆出黑盒交互）
-│   ├── profiles.rs                        # 迁出原 profiles/ui_tests.rs（1,304L 拆为 catalog / import_edit / activation）
-│   ├── overrides.rs                       # 迁出原 overrides/ui_tests.rs
-│   ├── connections.rs                     # 迁出原 connections/ui_tests.rs + page_integration/tests.rs
-│   ├── rules.rs                           # 迁出原 rules/tests.rs 无头窗口部分
-│   ├── logs.rs                            # 迁出原 logs/host_ui_tests.rs + logs/tests.rs 无头窗口部分
-│   ├── traffic.rs                         # 迁出原 traffic/view/keyboard_tests.rs 无头键盘聚焦与激活流
-│   ├── network.rs                         # 迁出原 network/ui_tests.rs
-│   ├── capture_and_kernel.rs              # 迁出原 system_proxy/ui_tests.rs + mihomo/ui_tests.rs + config_inputs/{ui_tests,host_ui_tests}.rs
-│   └── settings_and_backup.rs             # 迁出原 settings/ui_tests.rs + settings/backup/ui_tests.rs
+│   ├── home_and_proxies.rs                # RuntimePage Home 仪表盘与 ProxiesPage 节点筛选/排序流
+│   ├── profiles_and_overrides.rs          # Profiles 目录展示与 Override 预览/删除端到端流
+│   ├── connections_and_rules.rs           # Connections 过滤/暂停与 Rules 规则检视流
+│   ├── capture_and_kernel.rs              # System Proxy / TUN / Mihomo / DNS / Sniffer 受控配置流
+│   └── settings_and_network.rs            # Settings / Network / Traffic / Logs / Resources 交互流
 │
-└── ui_shell/                              # 【Tier 3】required-features = ["test-support"]（整壳跨页端到端流）
+└── ui_shell/                              # 【Tier 3】required-features = ["test-support"]（整壳跨页与托盘端到端流）
     ├── main.rs
-    ├── app_lifecycle_and_window.rs        # 迁出原 app/window/tests.rs + lifecycle/ui_tests.rs + offline_pages 流
-    ├── tray_and_menu_preferences.rs       # 迁出原 app/menu_preferences/tests.rs + tray_receipts.rs + app/tray/refresh/observation_tests.rs
-    ├── service_tun_and_maintenance.rs     # 迁出原 pages/runtime/ui_tests/{service_tun,service_maintenance}.rs
-    └── design_validation.rs               # #[cfg(target_os = "windows")] 迁出原 ui_tests/design_validation/
+    ├── app_navigation_and_window.rs       # ZenClashApp 整壳侧栏导航、折叠、主题切换、Safe Mode 与窗口重开
+    └── tray_and_preferences.rs            # TrayMenuState / TrayCommandBindings / PreferencePreviews / OutboundMode 协调流
 ```
+
+> **白盒边界保留说明**：原 `src/` 内需要访问 `RuntimePage` / `ZenClashApp` 私有字段或竞态注入钩子的 505 个既有白盒测试完整保留在 `src/` 对应 `tests.rs` / `ui_tests.rs` 中，避免为外迁测试破坏生产类型封装（遵循 GPUI Kit *No `pub` fields across the seam*）；外部 `tests/ui_{components,features,shell}/` 全部通过公开 API 与 `zenclash_ui::test_support` 门面做纯黑盒验证。
 
 ### 4.2 `Cargo.toml` 特性门控与显式目标声明（关键 Cargo 细节）
 
@@ -286,13 +288,13 @@ required-features = ["test-support"]
 
 ## 五、CI 静态分层守护升级（防结构再次腐化）
 
-在 [crates/zenclash-app/tests/architecture_guards.rs](file:///Users/haiwen/gitrepo/ZenClash/crates/zenclash-app/tests/architecture_guards.rs) 中，在已有全仓无 `mod.rs` 门禁与 `zenclash-core` 五层 DAG 门禁基础上，新增 4 项 `zenclash-ui` 专属静态门禁：
+在 [crates/zenclash-app/tests/architecture_guards.rs](file:///Users/haiwen/gitrepo/ZenClash/crates/zenclash-app/tests/architecture_guards.rs) 中，在已有全仓无 `mod.rs` 门禁与 `zenclash-core` 五层 DAG 门禁基础上，已落地 4 项 `zenclash-ui` 专属纯 `std` 静态门禁（加配套单元测试，整套 `architecture_guards` 共 **18 项测试**）：
 
 ```mermaid
 flowchart TD
     L4["shell/ (Layer 4: ZenClashApp / Window / Tray / Controllers)"] --> L3["features/ (Layer 3: 独立垂直页面 Feature)"]
-    L4 --> L2["runtime_host/ (Layer 2: Observation / Lifecycle / ConfigInputs)"]
-    L4 --> L1["components/ (Layer 1: 可复用 UI 组件)"]
+    L4 --> L2["runtime_host/ (Layer 2: Services / Observation / ConfigInputs / Schedule)"]
+    L4 --> L1["components/ (Layer 1: 可复用 UI / Page / Form 原语)"]
     L4 --> L0["foundation/ (Layer 0: Design / Assets / Actions / Primitives)"]
     L3 --> L2
     L3 --> L1
@@ -303,13 +305,16 @@ flowchart TD
 ```
 
 1. **`zenclash_ui_top_level_layout_is_strictly_five_layers`**
-   - 校验 `crates/zenclash-ui/src/` 顶层仅允许存在 `lib.rs`、`main.rs`、`foundation(.rs)`、`components(.rs)`、`runtime_host(.rs)`、`features(.rs)`、`shell(.rs)`、`test_support(.rs)`（禁止再往顶层平铺胶水文件）。
+   - 校验 `crates/zenclash-ui/src/` 顶层仅允许存在 `lib.rs`、`main.rs`、`foundation(.rs)`、`components(.rs)`、`runtime_host(.rs)`、`features(.rs)`、`shell(.rs)`、`test_support(.rs)`，且 5 个业务层均同时具备 `<layer>.rs` 与 `<layer>/`（禁止再往顶层平铺胶水文件）。
 2. **`zenclash_ui_enforces_strict_five_layer_dag`**
-   - 校验生产代码严格遵循 `shell[4] -> features[3] -> runtime_host[2] -> components[1] -> foundation[0]`（同时拦截显式层路径与 `lib.rs` 根重导出反向引用，禁止任何向上依赖）。
+   - 校验生产代码严格遵循 `foundation[0] < components[1] < runtime_host[2] < features[3] < shell[4]`：
+     - 同时拦截显式层路径（`crate::<target>::...`、`use crate::{..., <target>::...}`、跨层 `super::...`）与 `crates/zenclash-ui/src/lib.rs` 根重导出快捷方式（`actions`/`assets`/`design` → `foundation`、`app`/`tray` → `shell`）。
+     - 同步断言严格无环层 `foundation`、`components`、`runtime_host` 内部不存在任何直接双向子模块环（`shell` 因 `ZenClashApp` 根结构分拆 `impl` 允许 `app` 与其协调子模块双向引用）。
 3. **`zenclash_ui_features_are_horizontally_isolated`**
-   - 校验 `features/` 下任意业务 Feature（如 `home`、`proxies`、`profiles`、`connections`、`rules`、`logs`、`traffic`、`network`、`resources`、`capture`、`kernel`、`settings`）**严禁直接引用兄弟 Feature 的内部模块**；跨 Feature 联动必须通过 `foundation::actions`、`runtime_host` 或 `shell` 编排（仅 `features/host.rs` 路由宿主可聚合各 Feature）。
+   - 扫描 `crates/zenclash-ui/src/features/` 下全部兄弟 Feature（`capture`、`connections`、`home`、`kernel`、`logs`、`network`、`overrides`、`profiles`、`proxies`、`resources`、`rules`、`settings`、`traffic`，排除聚合路由宿主 `host`），断言任意兄弟 Feature `A` 生产代码**严禁通过 `crate::features::<B>` 或跨回 `features/` 的 `super::...::<B>` 引用另一兄弟 Feature `B`**；跨 Feature 联动必须经由 `foundation::actions`、`runtime_host`、`features/host` 或 `shell` 编排。
+   - 配套白盒单测 `horizontal_feature_detector_catches_cross_feature_refs_and_ignores_host_and_cfg_test` 回归验证跨 Feature 检测同时放行 `#[cfg(test)]` 与 `features/host/*`。
 4. **`zenclash_ui_has_zero_empty_source_directories`**
-   - 扫描 `crates/zenclash-ui/src/` 断言不存在任何空目录（防止类似 `src/app/controllers/wifi/` 的死目录残留）。
+   - 递归遍历 `crates/zenclash-ui/src/` 断言不存在任何空目录（防止类似 `src/app/controllers/wifi/` 的死目录残留）。
 
 ---
 

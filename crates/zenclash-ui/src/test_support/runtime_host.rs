@@ -25,6 +25,7 @@ pub(crate) fn runtime_page_test_directory(name: &str) -> std::path::PathBuf {
     directory
 }
 
+#[cfg(test)]
 pub(crate) fn runtime_page_services(
     runtime: &tokio::runtime::Runtime,
     directory: &std::path::Path,
@@ -73,6 +74,7 @@ pub(crate) fn runtime_page_services(
     }
 }
 
+#[cfg(test)]
 #[expect(
     clippy::future_not_send,
     reason = "GPUI test contexts remain on the foreground thread"
@@ -110,7 +112,8 @@ use zenclash_core::{
     OperationalStatus, ProfileStore, TrafficCaptureSession, TrafficHistoryStore, TrafficMonitor,
     YamlOverrideStore,
 };
-pub(crate) struct RuntimePageFixture {
+/// Isolated `RuntimePage` fixture with private temp stores, Tokio runtime, and mockable core session.
+pub struct RuntimePageFixture {
     pub(crate) root: PathBuf,
     pub(crate) managed_process: Option<Arc<ManagedCoreProcess>>,
     pub(crate) runtime: Option<tokio::runtime::Runtime>,
@@ -124,12 +127,30 @@ pub(crate) struct RuntimePageFixture {
     pub(crate) logs: Arc<LogMonitor>,
 }
 
+impl Default for RuntimePageFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimePageFixture {
-    pub(crate) fn new() -> Self {
+    /// Creates an isolated fixture pointing at an offline loopback controller address.
+    ///
+    /// # Panics
+    ///
+    /// Panics if constructing the temporary directories, profile store, or Tokio runtime fails.
+    #[must_use]
+    pub fn new() -> Self {
         Self::with_controller("http://127.0.0.1:1".to_owned())
     }
 
-    pub(crate) fn with_controller(controller: String) -> Self {
+    /// Creates an isolated fixture wired to the supplied loopback controller URL.
+    ///
+    /// # Panics
+    ///
+    /// Panics if constructing the Tokio runtime or temporary fixture stores fails.
+    #[must_use]
+    pub fn with_controller(controller: String) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -138,7 +159,13 @@ impl RuntimePageFixture {
         Self::with_controller_and_runtime(controller, runtime)
     }
 
-    pub(crate) fn with_controller_and_runtime(
+    /// Creates an isolated fixture using the caller-provided Tokio runtime and controller URL.
+    ///
+    /// # Panics
+    ///
+    /// Panics if initializing the temporary profile or override stores fails.
+    #[must_use]
+    pub fn with_controller_and_runtime(
         controller: String,
         runtime: tokio::runtime::Runtime,
     ) -> Self {
@@ -183,7 +210,47 @@ impl RuntimePageFixture {
         }
     }
 
-    pub(crate) fn services(&self) -> RuntimePageServices {
+    /// Returns the isolated temporary root directory owned by this fixture.
+    #[must_use]
+    pub fn root_dir(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Returns the isolated profile store owned by this fixture.
+    #[must_use]
+    pub fn profiles(&self) -> &ProfileStore {
+        &self.profiles
+    }
+
+    /// Returns the isolated YAML override store owned by this fixture.
+    #[must_use]
+    pub fn overrides(&self) -> &YamlOverrideStore {
+        &self.overrides
+    }
+
+    /// Returns the isolated controlled-config store owned by this fixture.
+    #[must_use]
+    pub fn controlled_config(&self) -> &ControlledConfigStore {
+        &self.controlled
+    }
+
+    /// Returns a handle to the Tokio runtime owned by this fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after the fixture has been dropped.
+    #[must_use]
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.as_ref().unwrap().handle().clone()
+    }
+
+    /// Builds `RuntimePageServices` bound to this fixture's isolated stores and runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after the fixture has been dropped.
+    #[must_use]
+    pub fn services(&self) -> RuntimePageServices {
         RuntimePageServices {
             profile_store: Some(self.profiles.clone()),
             override_store: Some(self.overrides.clone()),
@@ -215,18 +282,34 @@ impl RuntimePageFixture {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn enter_runtime(&self) -> tokio::runtime::EnterGuard<'_> {
         self.runtime.as_ref().unwrap().enter()
     }
 
-    pub(crate) fn wait_for_initial_reads(
-        &self,
-        cx: &mut TestAppContext,
-        page: &Entity<RuntimePage>,
-    ) {
+    /// Waits until initial page loading, persistent store loading, and config inputs have settled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page does not settle within the bounded test deadline.
+    pub fn wait_for_initial_reads(&self, cx: &mut TestAppContext, page: &Entity<RuntimePage>) {
         self.settle(cx, page, |page| {
             !page.loading && !page.persistent_loading && !page.config_inputs.is_loading()
         });
+    }
+
+    /// Waits until `page`'s override catalog reaches `expected` items.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the override count does not match within the bounded test deadline.
+    pub fn settle_override_count(
+        &self,
+        cx: &mut TestAppContext,
+        page: &Entity<RuntimePage>,
+        expected: usize,
+    ) {
+        self.settle(cx, page, |page| page.override_count_for_test() == expected);
     }
 
     pub(crate) fn settle(
@@ -238,8 +321,50 @@ impl RuntimePageFixture {
         self.settle_with_context(cx, page, |page, _| predicate(page));
     }
 
-    pub(crate) fn settle_connections(&self, cx: &mut TestAppContext, page: &Entity<RuntimePage>) {
+    /// Waits until the `ConnectionsView` child entity finishes all pending projections.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the connections view does not become idle within the bounded test deadline.
+    pub fn settle_connections(&self, cx: &mut TestAppContext, page: &Entity<RuntimePage>) {
         self.settle_with_context(cx, page, |page, cx| page.connections_idle(cx));
+    }
+
+    /// Waits until the `RulesView` child entity finishes all pending rule projections.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rules view does not become idle within the bounded test deadline.
+    pub fn settle_rules(&self, cx: &mut TestAppContext, page: &Entity<RuntimePage>) {
+        self.settle_with_context(cx, page, |page, cx| page.rules_idle(cx));
+    }
+
+    /// Polls `condition` on the GPUI foreground executor using this fixture's Tokio timer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `condition` does not become `true` within the bounded test deadline.
+    pub fn wait_until(
+        &self,
+        cx: &mut TestAppContext,
+        mut condition: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        cx.foreground_executor().clone().block_test(async {
+            for _ in 0..1_000 {
+                if condition(cx) {
+                    return;
+                }
+                self.runtime
+                    .as_ref()
+                    .unwrap()
+                    .spawn(async {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    })
+                    .await
+                    .unwrap();
+            }
+            panic!("condition did not settle within bounded deadline");
+        });
     }
 
     pub(crate) fn settle_with_context(
@@ -283,7 +408,12 @@ impl Drop for RuntimePageFixture {
     }
 }
 
-pub(crate) fn open_runtime_page_window(
+/// Opens a headless GPUI `Root` window hosting a `RuntimePage` starting at `initial`.
+///
+/// # Panics
+///
+/// Panics if the headless window fails to construct the `RuntimePage` view entity.
+pub fn open_runtime_page_window(
     cx: &mut TestAppContext,
     fixture: &RuntimePageFixture,
     initial: Page,
@@ -305,4 +435,63 @@ pub(crate) fn open_runtime_page_window(
         Root::new(view, window, cx)
     });
     (handle.into(), page.unwrap())
+}
+
+/// Switches `page` to `target` using the production `RuntimePage::switch_to` path.
+pub fn switch_runtime_page(cx: &mut TestAppContext, page: &Entity<RuntimePage>, target: Page) {
+    cx.update(|cx| {
+        page.update(cx, |page, cx| page.switch_to(target, cx));
+    });
+}
+
+/// Returns the active destination currently presented by `page`.
+#[must_use]
+pub fn current_runtime_page(cx: &mut TestAppContext, page: &Entity<RuntimePage>) -> Page {
+    cx.update(|cx| page.read(cx).current_page_for_test())
+}
+
+/// Returns whether `page` currently has an admitted core mutation in flight.
+#[must_use]
+pub fn is_core_busy(cx: &mut TestAppContext, page: &Entity<RuntimePage>) -> bool {
+    cx.update(|cx| page.read(cx).is_core_busy_for_test())
+}
+
+/// Seeds a `ConnectionsSnapshot` into `page` through the normal snapshot replacement path.
+pub fn seed_connections_snapshot(
+    cx: &mut TestAppContext,
+    page: &Entity<RuntimePage>,
+    snapshot: zenclash_core::ConnectionsSnapshot,
+) {
+    cx.update(|cx| {
+        page.update(cx, |page, cx| {
+            page.seed_connections_snapshot_for_test(snapshot, cx);
+        });
+    });
+}
+
+/// Seeds a `RuntimeConfig` snapshot into `page` for configuration-page UI integration tests.
+pub fn seed_runtime_config(
+    cx: &mut TestAppContext,
+    page: &Entity<RuntimePage>,
+    config: zenclash_core::RuntimeConfig,
+) {
+    cx.update(|cx| {
+        page.update(cx, |page, cx| {
+            page.seed_runtime_config_for_test(config, cx);
+        });
+    });
+}
+
+/// Attaches an isolated preferences store and value snapshot to `page`.
+pub fn seed_preferences_store(
+    cx: &mut TestAppContext,
+    page: &Entity<RuntimePage>,
+    store: zenclash_core::AppPreferencesStore,
+    preferences: AppPreferences,
+) {
+    cx.update(|cx| {
+        page.update(cx, |page, cx| {
+            page.seed_preferences_store_for_test(store, preferences, cx);
+        });
+    });
 }

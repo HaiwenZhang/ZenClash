@@ -103,9 +103,66 @@ impl EventEmitter<ContinueLocalRequested> for RuntimePage {}
 impl EventEmitter<ServiceRepairRestartRequested> for RuntimePage {}
 impl EventEmitter<PreferencesRestored> for RuntimePage {}
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl RuntimePage {
     pub(crate) fn connections_idle(&self, cx: &gpui_kit::App) -> bool {
         self.connections.read(cx).is_idle()
+    }
+
+    pub(crate) fn rules_idle(&self, cx: &gpui_kit::App) -> bool {
+        !self.rules.read(cx).is_projecting()
+    }
+
+    pub(crate) const fn current_page_for_test(&self) -> Page {
+        self.page
+    }
+
+    pub(crate) fn override_count_for_test(&self) -> usize {
+        self.library.overrides.catalog().items.len()
+    }
+
+    pub(crate) fn is_core_busy_for_test(&self) -> bool {
+        self.core_busy()
+    }
+
+    pub(crate) fn seed_connections_snapshot_for_test(
+        &mut self,
+        snapshot: zenclash_core::ConnectionsSnapshot,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
+        self.invalidate_page_load();
+        self.replace_page_data(
+            self.page_task_token_for(Page::Connections),
+            crate::runtime_host::observation::PageSnapshotData::Connections(std::sync::Arc::new(
+                snapshot,
+            )),
+            cx,
+        );
+    }
+
+    pub(crate) fn seed_runtime_config_for_test(
+        &mut self,
+        config: zenclash_core::RuntimeConfig,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
+        self.invalidate_page_load();
+        self.page_observation.replace_fixture_data(
+            crate::runtime_host::observation::PageSnapshotData::Config(config),
+        );
+        self.page_observation
+            .set_fixture_generation(self.core_session.generation());
+        self.error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn seed_preferences_store_for_test(
+        &mut self,
+        store: AppPreferencesStore,
+        preferences: AppPreferences,
+        cx: &mut gpui_kit::Context<Self>,
+    ) {
+        self.preferences_store = Some(store);
+        self.preferences = preferences;
+        cx.notify();
     }
 }

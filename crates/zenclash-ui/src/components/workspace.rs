@@ -6,7 +6,7 @@ use gpui_kit::{App, IntoElement, ParentElement, Styled, div, prelude::FluentBuil
 use crate::foundation::actions::Page;
 
 /// Title and supporting description aligned with the workspace content inset.
-pub(crate) fn title(page: Page, cx: &mut App) -> impl IntoElement {
+pub fn title(page: Page, cx: &mut App) -> impl IntoElement {
     let descriptor = page.descriptor();
     v_flex()
         .min_w_0()

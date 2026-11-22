@@ -1,14 +1,25 @@
-//! Unified crate-internal test fixtures shared across runtime host, features, and shell tests.
+//! Unified isolated test fixtures shared across runtime host, feature, and shell tests.
+//!
+//! Available only under `cfg(test)` or the non-production `test-support` feature.
 
-pub(crate) mod controller;
+/// Loopback mock Mihomo HTTP controller fixture.
+pub mod controller;
+#[cfg(test)]
 pub(crate) mod owned_cores;
-pub(crate) mod proxies;
-pub(crate) mod resources;
-pub(crate) mod runtime_host;
+/// Loopback proxy-group controller fixture and headless `ProxiesPage` helpers.
+pub mod proxies;
+/// Loopback resource/provider controller fixture.
+pub mod resources;
+/// Isolated `RuntimePage` fixture and headless window harness helpers.
+pub mod runtime_host;
+#[cfg(test)]
 pub(crate) mod service_workflow;
-pub(crate) mod shell_tray;
+/// Isolated `ZenClashApp` shell, native tray menu, and preference-preview test harness.
+pub mod shell_tray;
 
-pub(crate) use controller::ControllerFixture;
+pub use controller::ControllerFixture;
+#[cfg(test)]
 pub(crate) use owned_cores::owned_ui_children;
-pub(crate) use runtime_host::{RuntimePageFixture, open_runtime_page_window};
+pub use runtime_host::{RuntimePageFixture, open_runtime_page_window};
+#[cfg(test)]
 pub(crate) use service_workflow::{open_service_page, open_service_tun};

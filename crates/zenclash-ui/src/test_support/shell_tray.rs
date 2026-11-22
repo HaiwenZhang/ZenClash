@@ -1,6 +1,8 @@
-//! Shared isolated application services for window interaction tests.
+//! Shared isolated application services, native tray menu builders, and shell window helpers.
 
-pub(crate) fn app_test_services(
+/// Builds isolated `AppServices` backed by `fixture` without touching OS user directories.
+#[must_use]
+pub fn app_test_services(
     fixture: &crate::test_support::runtime_host::RuntimePageFixture,
 ) -> crate::shell::app::AppServices {
     let services = fixture.services();
@@ -31,15 +33,29 @@ pub(crate) fn app_test_services(
 }
 
 // Owned loopback controller and real application-window construction for tray origin tests.
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncWriteExt;
 use zenclash_core::{CoreKind, CoreSession, MihomoClient, MihomoEndpoint};
 
-pub(crate) struct TrayController {
+/// Loopback mock Mihomo controller tailored for shell and native tray command tests.
+pub struct TrayController {
     pub(crate) endpoint: String,
     pub(crate) requests: Arc<Mutex<Vec<String>>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box tray tests")
+    )]
     pub(crate) started: Option<tokio::sync::oneshot::Receiver<()>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box tray tests")
+    )]
     pub(crate) release: Option<tokio::sync::oneshot::Sender<()>>,
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by internal white-box tray tests")
+    )]
     pub(crate) store: zenclash_core::ControlledConfigStore,
     fail_catalog_reads: Arc<std::sync::atomic::AtomicBool>,
     root: std::path::PathBuf,
@@ -48,15 +64,29 @@ pub(crate) struct TrayController {
 }
 
 impl TrayController {
-    pub(crate) fn fail_catalog_reads(&self) {
+    /// Forces subsequent `GET /proxies` requests to return HTTP 503.
+    pub fn fail_catalog_reads(&self) {
         self.fail_catalog_reads
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    pub(crate) fn new(
-        runtime: &tokio::runtime::Handle,
-        pause_prefix: Option<&'static str>,
-    ) -> Self {
+    /// Returns all HTTP request lines received by this controller.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal request log mutex is poisoned.
+    #[must_use]
+    pub fn recorded_requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Spawns a loopback controller on `runtime`, optionally pausing the first matching request.
+    ///
+    /// # Panics
+    ///
+    /// Panics if creating the temporary fixture directory or binding localhost fails.
+    #[must_use]
+    pub fn new(runtime: &tokio::runtime::Handle, pause_prefix: Option<&'static str>) -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "zenclash-tray-controller-{}-{}",
@@ -142,7 +172,13 @@ impl TrayController {
         }
     }
 
-    pub(crate) fn session(&self) -> CoreSession {
+    /// Opens a `CoreSession` pointed at this controller's loopback endpoint.
+    ///
+    /// # Panics
+    ///
+    /// Panics if constructing the Mihomo client or session fails.
+    #[must_use]
+    pub fn session(&self) -> CoreSession {
         CoreSession::open(
             CoreKind::Mihomo,
             MihomoClient::new(MihomoEndpoint::new(&self.endpoint, "")).unwrap(),
@@ -159,10 +195,32 @@ impl Drop for TrayController {
     }
 }
 
-pub(crate) fn open_app(
+/// Opens a full production `ZenClashApp` inside a headless `Root` window and waits for initial reads.
+///
+/// # Panics
+///
+/// Panics if window initialization fails or initial runtime reads do not settle.
+pub fn open_app(
     cx: &mut gpui_kit::TestAppContext,
     fixture: &crate::test_support::runtime_host::RuntimePageFixture,
     session: CoreSession,
+) -> (
+    gpui_kit::AnyWindowHandle,
+    gpui_kit::Entity<crate::shell::app::ZenClashApp>,
+) {
+    open_app_with_safe_mode(cx, fixture, session, zenclash_app::SafeMode::disabled())
+}
+
+/// Opens a full production `ZenClashApp` with an explicit `SafeMode` policy inside a headless window.
+///
+/// # Panics
+///
+/// Panics if window initialization fails or initial runtime reads do not settle.
+pub fn open_app_with_safe_mode(
+    cx: &mut gpui_kit::TestAppContext,
+    fixture: &crate::test_support::runtime_host::RuntimePageFixture,
+    session: CoreSession,
+    safe_mode: zenclash_app::SafeMode,
 ) -> (
     gpui_kit::AnyWindowHandle,
     gpui_kit::Entity<crate::shell::app::ZenClashApp>,
@@ -172,8 +230,12 @@ pub(crate) fn open_app(
     services.client = session.client().clone();
     services.core_session = session;
     services.profile_path = None;
+    services.safe_mode = safe_mode;
     cx.executor().allow_parking();
-    cx.update(crate::shell::app::init);
+    cx.update(|cx| {
+        crate::shell::app::init(cx);
+        cx.set_reduce_motion(true);
+    });
     let mut owner = None;
     let window = cx.open_window(size(px(1280.), px(820.)), |window, cx| {
         let preferences = services.preferences.clone();
@@ -187,4 +249,98 @@ pub(crate) fn open_app(
     let page = cx.update(|cx| owner.read(cx).runtime_page.clone());
     fixture.wait_for_initial_reads(cx, &page);
     (window.into(), owner)
+}
+
+/// Returns the active destination selected in `app`.
+#[must_use]
+pub fn app_current_page(
+    cx: &mut gpui_kit::TestAppContext,
+    app: &gpui_kit::Entity<crate::shell::app::ZenClashApp>,
+) -> crate::foundation::actions::Page {
+    cx.update(|cx| app.read(cx).current_page_for_test())
+}
+
+/// Returns whether the navigation sidebar is currently collapsed in `app`.
+#[must_use]
+pub fn app_sidebar_collapsed(
+    cx: &mut gpui_kit::TestAppContext,
+    app: &gpui_kit::Entity<crate::shell::app::ZenClashApp>,
+) -> bool {
+    cx.update(|cx| app.read(cx).sidebar_collapsed_for_test())
+}
+
+/// Returns the currently displayed outbound routing mode in `app`.
+#[must_use]
+pub fn app_outbound_mode(
+    cx: &mut gpui_kit::TestAppContext,
+    app: &gpui_kit::Entity<crate::shell::app::ZenClashApp>,
+) -> crate::outbound_mode::OutboundMode {
+    cx.update(|cx| app.read(cx).outbound_mode_for_test())
+}
+
+/// Builds the native tray menu from `state` and returns its generated menu-ID-to-command bindings.
+///
+/// # Errors
+///
+/// Returns an error if constructing any native tray menu item fails.
+pub fn build_tray_menu_commands(
+    state: &crate::shell::tray::native::TrayMenuState,
+) -> Result<HashMap<String, crate::shell::tray::native::TrayCommand>, String> {
+    crate::shell::tray::native::build_menu_commands_for_test(state)
+}
+
+/// Black-box test harness around the native tray menu command-to-observation bindings.
+pub struct TrayCommandBindingHarness(crate::shell::tray::native::TrayCommandBindingsForTest);
+
+impl TrayCommandBindingHarness {
+    /// Creates a binding table associating `commands` with an optional observation identity.
+    #[must_use]
+    pub fn new(
+        commands: HashMap<String, crate::shell::tray::native::TrayCommand>,
+        observation: Option<zenclash_core::CoreObservationIdentity>,
+    ) -> Self {
+        Self(crate::shell::tray::native::TrayCommandBindingsForTest::new(
+            commands,
+            observation,
+        ))
+    }
+
+    /// Replaces the observation identity attached to subsequent resolved tray commands.
+    pub fn update_observation(
+        &mut self,
+        observation: Option<zenclash_core::CoreObservationIdentity>,
+    ) {
+        self.0.update_observation(observation);
+    }
+
+    /// Resolves a menu item identifier into its command and attached observation identity.
+    #[must_use]
+    pub fn resolve(
+        &self,
+        id: &str,
+    ) -> Option<(
+        crate::shell::tray::native::TrayCommand,
+        Option<zenclash_core::CoreObservationIdentity>,
+    )> {
+        self.0.resolve_command(id)
+    }
+}
+
+/// Applies staged menu preference previews onto `preferences` using `PreferencePreviews`.
+pub fn apply_preference_previews(
+    preferences: &mut zenclash_core::AppPreferences,
+    appearance: Option<zenclash_core::AppearancePreference>,
+    tray_visible: Option<bool>,
+) {
+    use crate::foundation::primitives::preference_previews::{
+        MenuPreferenceChange, PreferencePreviews,
+    };
+    let mut changes = Vec::new();
+    if let Some(value) = appearance {
+        changes.push(MenuPreferenceChange::Appearance(value));
+    }
+    if let Some(value) = tray_visible {
+        changes.push(MenuPreferenceChange::TrayVisibility(value));
+    }
+    PreferencePreviews::new(changes).apply(preferences);
 }

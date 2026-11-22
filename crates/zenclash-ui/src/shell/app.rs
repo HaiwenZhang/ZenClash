@@ -607,3 +607,18 @@ impl ZenClashApp {
         self.shell.tasks.push(task);
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+impl ZenClashApp {
+    pub(crate) const fn current_page_for_test(&self) -> Page {
+        self.current_page
+    }
+
+    pub(crate) const fn sidebar_collapsed_for_test(&self) -> bool {
+        self.sidebar_collapsed
+    }
+
+    pub(crate) fn outbound_mode_for_test(&self) -> OutboundMode {
+        self.outbound_mode.displayed()
+    }
+}

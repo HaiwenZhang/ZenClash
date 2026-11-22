@@ -9,9 +9,31 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Isolated UI integration test fixtures. Never enable for production packaging.
+test-support = [
+    "gpui-kit/test-support",
+    "zenclash-app/test-support",
+    "zenclash-core/test-support",
+]
+
 [[bin]]
 name = "zenclash"
 path = "src/main.rs"
+
+[[test]]
+name = "ui_components"
+path = "tests/ui_components/main.rs"
+
+[[test]]
+name = "ui_features"
+path = "tests/ui_features/main.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "ui_shell"
+path = "tests/ui_shell/main.rs"
+required-features = ["test-support"]
 
 [dependencies]
 chrono.workspace = true

@@ -344,7 +344,7 @@ impl RulesView {
         self.worker.hold_projection()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::features) fn is_projecting(&self) -> bool {
         self.projecting
     }

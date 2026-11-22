@@ -1,10 +1,11 @@
-//! CI static architecture boundary guards (Section 6.1 of the v2.0 redesign and
-//! Section 5 of the `zenclash-core` 5-layer layout redesign).
+//! CI static architecture boundary guards (Section 6.1 of the v2.0 redesign,
+//! Section 5 of the `zenclash-core` 5-layer layout redesign, and Section 5 of
+//! the `zenclash-ui` 5-layer layout redesign).
 //!
 //! Pure-Rust static analysis using only `std` (zero external crates) to enforce:
 //! 1. Zero direct bidirectional top-level module cycles in `zenclash-core` and `zenclash-ui`.
-//! 2. Full transitive closure of `zenclash-ui`'s `components` and `actions` never reaches
-//!    `pages` or `app`.
+//! 2. Full transitive closure of `zenclash-ui`'s `foundation` and `components` never reaches
+//!    `runtime_host`, `features`, or `shell`.
 //! 3. Zero runtime `ProfileStore::discover` / `YamlOverrideStore::discover` calls outside
 //!    `zenclash-app/src/bootstrap/`.
 //! 4. Zero GUI dependencies (`gpui-kit`, `tray-icon`, `objc2`) in `zenclash-app`.
@@ -14,6 +15,13 @@
 //! 8. Strict 5-layer downward-only DAG in `zenclash-core` (catching both explicit layer paths
 //!    and crate-root re-export shortcuts) plus zero bidirectional submodule cycles inside
 //!    `platform`, `storage`, and `workflows`.
+//! 9. Strict 5-layer top-level layout in `crates/zenclash-ui/src/`.
+//! 10. Strict 5-layer downward-only DAG in `zenclash-ui` (catching both explicit layer paths
+//!     and crate-root re-export shortcuts) plus zero bidirectional submodule cycles inside
+//!     `foundation`, `components`, and `runtime_host`.
+//! 11. Horizontal isolation across sibling features under `crates/zenclash-ui/src/features/`
+//!     (except `features/host`).
+//! 12. Zero empty directories under `crates/zenclash-ui/src/`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -26,6 +34,14 @@ use zenclash_core::{FULL_RELOAD_CONFIG_KEYS, HOT_UPDATE_CONFIG_KEYS};
 
 const ZENCLASH_CORE_LAYERS: [&str; 5] = ["platform", "mihomo", "storage", "runtime", "workflows"];
 const ZENCLASH_CORE_STRICTLY_ACYCLIC_LAYERS: [&str; 3] = ["platform", "storage", "workflows"];
+const ZENCLASH_UI_LAYERS: [&str; 5] = [
+    "foundation",
+    "components",
+    "runtime_host",
+    "features",
+    "shell",
+];
+const ZENCLASH_UI_STRICTLY_ACYCLIC_LAYERS: [&str; 3] = ["foundation", "components", "runtime_host"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Token {
@@ -383,7 +399,7 @@ fn zenclash_core_enforces_strict_five_layer_dag() {
     let lib_source = fs::read_to_string(&lib_rs)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", lib_rs.display()));
     let lib_tokens = strip_cfg_test_tokens(&tokenize_code(&lib_source));
-    let reexports = parse_crate_root_reexports(&lib_tokens);
+    let reexports = parse_crate_root_reexports(&lib_tokens, &ZENCLASH_CORE_LAYERS);
 
     assert!(
         !reexports.is_empty(),
@@ -424,7 +440,7 @@ fn zenclash_core_enforces_strict_five_layer_dag() {
         let Some(owner_layer) = top_level_owner(rel) else {
             continue;
         };
-        if core_layer_rank(&owner_layer).is_none() {
+        if layer_rank(&ZENCLASH_CORE_LAYERS, &owner_layer).is_none() {
             continue;
         }
 
@@ -439,6 +455,7 @@ fn zenclash_core_enforces_strict_five_layer_dag() {
             &production_tokens,
             &owner_layer,
             depth_from_crate,
+            &ZENCLASH_CORE_LAYERS,
             &reexports,
         ) {
             upward_violations.push(format!("{rel_display}: {violation}"));
@@ -493,6 +510,281 @@ fn zenclash_core_enforces_strict_five_layer_dag() {
         intra_layer_cycles.is_empty(),
         "direct bidirectional submodule cycles detected inside strictly acyclic `zenclash-core` layers:\n{}",
         intra_layer_cycles.join("\n")
+    );
+}
+
+#[test]
+fn zenclash_ui_top_level_layout_is_strictly_five_layers() {
+    let ui_src = workspace_root().join("crates/zenclash-ui/src");
+    let allowed: BTreeSet<&str> = [
+        "lib.rs",
+        "main.rs",
+        "foundation",
+        "foundation.rs",
+        "components",
+        "components.rs",
+        "runtime_host",
+        "runtime_host.rs",
+        "features",
+        "features.rs",
+        "shell",
+        "shell.rs",
+        "test_support",
+        "test_support.rs",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut unexpected = Vec::new();
+    let entries = fs::read_dir(&ui_src)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", ui_src.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry should be readable").path();
+        let name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or_else(|| panic!("non-UTF-8 entry in {}", ui_src.display()));
+        if !allowed.contains(name) {
+            unexpected.push(name.to_owned());
+        }
+    }
+    unexpected.sort();
+
+    let mut missing = Vec::new();
+    for entry_file in ["lib.rs", "main.rs"] {
+        if !ui_src.join(entry_file).is_file() {
+            missing.push(format!("{entry_file} (file)"));
+        }
+    }
+    for layer in ZENCLASH_UI_LAYERS {
+        if !ui_src.join(format!("{layer}.rs")).is_file() {
+            missing.push(format!("{layer}.rs (file)"));
+        }
+        if !ui_src.join(layer).is_dir() {
+            missing.push(format!("{layer}/ (directory)"));
+        }
+    }
+
+    assert!(
+        unexpected.is_empty() && missing.is_empty(),
+        "crates/zenclash-ui/src/ top-level layout mismatch:\n  unexpected: {unexpected:?}\n  missing: {missing:?}"
+    );
+}
+
+#[test]
+fn zenclash_ui_enforces_strict_five_layer_dag() {
+    let root = workspace_root();
+    let ui_src = root.join("crates/zenclash-ui/src");
+    let lib_rs = ui_src.join("lib.rs");
+    let lib_source = fs::read_to_string(&lib_rs)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", lib_rs.display()));
+    let lib_tokens = strip_cfg_test_tokens(&tokenize_code(&lib_source));
+    let reexports = parse_crate_root_reexports(&lib_tokens, &ZENCLASH_UI_LAYERS);
+
+    assert!(
+        !reexports.is_empty(),
+        "expected crate-root re-exports parsed from {}",
+        lib_rs.display()
+    );
+    assert_eq!(
+        reexports.get("actions").map(String::as_str),
+        Some("foundation"),
+        "expected `pub use foundation::{{actions, ...}};` to map `actions` -> `foundation`"
+    );
+    assert_eq!(
+        reexports.get("assets").map(String::as_str),
+        Some("foundation"),
+        "expected `pub use foundation::{{..., assets, ...}};` to map `assets` -> `foundation`"
+    );
+    assert_eq!(
+        reexports.get("design").map(String::as_str),
+        Some("foundation"),
+        "expected `pub use foundation::{{..., design}};` to map `design` -> `foundation`"
+    );
+    assert_eq!(
+        reexports.get("app").map(String::as_str),
+        Some("shell"),
+        "expected `pub use shell::app;` to map `app` -> `shell`"
+    );
+    assert_eq!(
+        reexports.get("tray").map(String::as_str),
+        Some("shell"),
+        "expected `pub use shell::tray::native as tray;` to map `tray` -> `shell`"
+    );
+
+    let excluded_paths = collect_cfg_test_module_paths(&ui_src);
+    let mut files = Vec::new();
+    collect_rs_files(&ui_src, &mut files);
+    files.sort();
+
+    let mut upward_violations = Vec::new();
+    let mut checked_files = 0usize;
+
+    for file in files {
+        if is_test_only_file(&file, &ui_src, &excluded_paths) {
+            continue;
+        }
+        let Ok(rel) = file.strip_prefix(&ui_src) else {
+            continue;
+        };
+        let Some(owner_layer) = top_level_owner(rel) else {
+            continue;
+        };
+        if layer_rank(&ZENCLASH_UI_LAYERS, &owner_layer).is_none() {
+            continue;
+        }
+
+        checked_files += 1;
+        let source = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        let production_tokens = strip_cfg_test_tokens(&tokenize_code(&source));
+        let depth_from_crate = module_depth_from_root(rel);
+        let rel_display = file.strip_prefix(&root).unwrap_or(&file).display();
+
+        for violation in find_upward_layer_violations(
+            &production_tokens,
+            &owner_layer,
+            depth_from_crate,
+            &ZENCLASH_UI_LAYERS,
+            &reexports,
+        ) {
+            upward_violations.push(format!("{rel_display}: {violation}"));
+        }
+    }
+
+    assert!(
+        checked_files > 0,
+        "expected production files across the 5 layers under {}",
+        ui_src.display()
+    );
+    assert!(
+        upward_violations.is_empty(),
+        "upward layer dependencies detected in `zenclash-ui` (strict DAG: foundation[0] < components[1] < runtime_host[2] < features[3] < shell[4]):\n{}",
+        upward_violations.join("\n")
+    );
+
+    let mut intra_layer_cycles = Vec::new();
+    for layer in ZENCLASH_UI_STRICTLY_ACYCLIC_LAYERS {
+        let graph = build_layer_submodule_dependency_graph(&ui_src, layer, &excluded_paths);
+        assert!(
+            !graph.modules.is_empty(),
+            "expected submodules inside `zenclash-ui::{layer}`"
+        );
+        for (source, targets) in &graph.edges {
+            for target in targets {
+                if source < target
+                    && graph
+                        .edges
+                        .get(target)
+                        .is_some_and(|reverse| reverse.contains(source))
+                {
+                    let forward_files = graph
+                        .edge_files
+                        .get(&(source.clone(), target.clone()))
+                        .map(|files| files.iter().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    let reverse_files = graph
+                        .edge_files
+                        .get(&(target.clone(), source.clone()))
+                        .map(|files| files.iter().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    intra_layer_cycles.push(format!(
+                        "zenclash-ui::{layer}: {source} <-> {target}\n  {source} -> {target}: [{forward_files}]\n  {target} -> {source}: [{reverse_files}]"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        intra_layer_cycles.is_empty(),
+        "direct bidirectional submodule cycles detected inside strictly acyclic `zenclash-ui` layers:\n{}",
+        intra_layer_cycles.join("\n")
+    );
+}
+
+#[test]
+fn zenclash_ui_features_are_horizontally_isolated() {
+    let root = workspace_root();
+    let ui_src = root.join("crates/zenclash-ui/src");
+    let features_dir = ui_src.join("features");
+    let excluded_paths = collect_cfg_test_module_paths(&ui_src);
+
+    let mut sibling_features = discover_top_level_modules(&features_dir, &excluded_paths);
+    sibling_features.remove("host");
+    assert!(
+        !sibling_features.is_empty(),
+        "expected sibling feature modules under {}",
+        features_dir.display()
+    );
+
+    let mut files = Vec::new();
+    collect_rs_files(&features_dir, &mut files);
+    files.sort();
+
+    let mut violations = Vec::new();
+    let mut checked_files = 0usize;
+
+    for file in files {
+        if is_test_only_file(&file, &ui_src, &excluded_paths) {
+            continue;
+        }
+        let Ok(rel) = file.strip_prefix(&features_dir) else {
+            continue;
+        };
+        let Some(owner_feature) = top_level_owner(rel) else {
+            continue;
+        };
+        if owner_feature == "host" || !sibling_features.contains(&owner_feature) {
+            continue;
+        }
+
+        checked_files += 1;
+        let source = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        let production_tokens = strip_cfg_test_tokens(&tokenize_code(&source));
+        let depth_in_features = module_depth_from_root(rel);
+        let rel_display = file.strip_prefix(&root).unwrap_or(&file).display();
+
+        for violation in find_horizontal_feature_violations(
+            &production_tokens,
+            &owner_feature,
+            depth_in_features,
+            &sibling_features,
+        ) {
+            violations.push(format!("{rel_display}: {violation}"));
+        }
+    }
+
+    assert!(
+        checked_files > 0,
+        "expected production files across sibling features under {}",
+        features_dir.display()
+    );
+    assert!(
+        violations.is_empty(),
+        "horizontal feature dependencies detected under `crates/zenclash-ui/src/features/` (sibling features must not import one another):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn zenclash_ui_has_zero_empty_source_directories() {
+    let root = workspace_root();
+    let ui_src = root.join("crates/zenclash-ui/src");
+    let mut empty_dirs = Vec::new();
+    collect_empty_dirs(&ui_src, &mut empty_dirs);
+    empty_dirs.sort();
+
+    let formatted = empty_dirs
+        .iter()
+        .map(|dir| dir.strip_prefix(&root).unwrap_or(dir).display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        formatted.is_empty(),
+        "empty source directories found under `crates/zenclash-ui/src/`:\n{}",
+        formatted.join("\n")
     );
 }
 
@@ -1364,10 +1656,8 @@ fn cfg_test_stripping_handles_modules_functions_and_struct_fields() {
     assert!(!tokens.contains(&Token::Ident("debug_calls".into())));
 }
 
-fn core_layer_rank(layer: &str) -> Option<usize> {
-    ZENCLASH_CORE_LAYERS
-        .iter()
-        .position(|&candidate| candidate == layer)
+fn layer_rank(layers: &[&str], layer: &str) -> Option<usize> {
+    layers.iter().position(|&candidate| candidate == layer)
 }
 
 fn module_depth_from_root(rel: &Path) -> usize {
@@ -1379,9 +1669,25 @@ fn module_depth_from_root(rel: &Path) -> usize {
     }
 }
 
-/// Parses top-level `pub use <layer>::...;` declarations in `crates/zenclash-core/src/lib.rs`
+fn collect_empty_dirs(directory: &Path, empty_dirs: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()));
+    let mut entry_count = 0usize;
+    for entry in entries {
+        entry_count += 1;
+        let path = entry.expect("directory entry should be readable").path();
+        if path.is_dir() {
+            collect_empty_dirs(&path, empty_dirs);
+        }
+    }
+    if entry_count == 0 {
+        empty_dirs.push(directory.to_path_buf());
+    }
+}
+
+/// Parses top-level `pub use <layer>::...;` declarations in a crate's `src/lib.rs`
 /// and maps every crate-root re-exported symbol or module alias to its owning layer.
-fn parse_crate_root_reexports(tokens: &[Token]) -> BTreeMap<String, String> {
+fn parse_crate_root_reexports(tokens: &[Token], layers: &[&str]) -> BTreeMap<String, String> {
     let mut reexports = BTreeMap::new();
     let mut index = 0;
     let mut brace_depth = 0usize;
@@ -1399,7 +1705,13 @@ fn parse_crate_root_reexports(tokens: &[Token]) -> BTreeMap<String, String> {
             Token::Ident(kw) if brace_depth == 0 && kw == "pub" => {
                 let after_vis = skip_visibility(tokens, index);
                 if matches!(tokens.get(after_vis), Some(Token::Ident(use_kw)) if use_kw == "use") {
-                    let next = parse_use_tree_reexports(tokens, after_vis + 1, &[], &mut reexports);
+                    let next = parse_use_tree_reexports(
+                        tokens,
+                        after_vis + 1,
+                        &[],
+                        layers,
+                        &mut reexports,
+                    );
                     index = if matches!(tokens.get(next), Some(Token::Punct(';'))) {
                         next + 1
                     } else {
@@ -1422,6 +1734,7 @@ fn parse_use_tree_reexports(
     tokens: &[Token],
     mut cursor: usize,
     prefix: &[String],
+    layers: &[&str],
     out: &mut BTreeMap<String, String>,
 ) -> usize {
     if matches!(
@@ -1444,7 +1757,7 @@ fn parse_use_tree_reexports(
                         cursor += 1;
                         continue;
                     }
-                    let next = parse_use_tree_reexports(tokens, cursor, &path, out);
+                    let next = parse_use_tree_reexports(tokens, cursor, &path, layers, out);
                     if next <= cursor {
                         cursor += 1;
                     } else {
@@ -1490,7 +1803,7 @@ fn parse_use_tree_reexports(
     }
 
     if let Some(layer) = slice.first()
-        && core_layer_rank(layer).is_some()
+        && layer_rank(layers, layer).is_some()
         && let Some(exported) = alias.or_else(|| slice.last().map(String::as_str))
         && exported != "_"
         && (slice.len() >= 2 || alias.is_some())
@@ -1630,9 +1943,10 @@ fn find_upward_layer_violations(
     production_tokens: &[Token],
     owner_layer: &str,
     depth_from_crate: usize,
+    layers: &[&str],
     reexports: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    let Some(owner_rank) = core_layer_rank(owner_layer) else {
+    let Some(owner_rank) = layer_rank(layers, owner_layer) else {
         return Vec::new();
     };
 
@@ -1644,20 +1958,49 @@ fn find_upward_layer_violations(
 
     let mut violations = Vec::new();
     for ident in root_refs {
-        if let Some(target_rank) = core_layer_rank(&ident) {
+        if let Some(target_rank) = layer_rank(layers, &ident) {
             if target_rank > owner_rank {
                 violations.push(format!(
                     "`{owner_layer}` (L{owner_rank}) references explicit `crate::{ident}` (`{ident}`, L{target_rank})"
                 ));
             }
         } else if let Some(target_layer) = reexports.get(&ident)
-            && let Some(target_rank) = core_layer_rank(target_layer)
+            && let Some(target_rank) = layer_rank(layers, target_layer)
             && target_rank > owner_rank
         {
             violations.push(format!(
                 "`{owner_layer}` (L{owner_rank}) references crate-root re-export `crate::{ident}` from `{target_layer}` (L{target_rank})"
             ));
         }
+    }
+
+    violations
+}
+
+fn find_horizontal_feature_violations(
+    production_tokens: &[Token],
+    owner_feature: &str,
+    depth_in_features: usize,
+    sibling_features: &BTreeSet<String>,
+) -> Vec<String> {
+    if owner_feature == "host" || !sibling_features.contains(owner_feature) {
+        return Vec::new();
+    }
+
+    let refs = extract_layer_submodule_refs(
+        production_tokens,
+        "features",
+        sibling_features,
+        depth_in_features,
+    );
+    let mut violations = Vec::new();
+    for target in refs {
+        if target == owner_feature || target == "host" {
+            continue;
+        }
+        violations.push(format!(
+            "sibling feature `{owner_feature}` references sibling feature `{target}`"
+        ));
     }
 
     violations
@@ -1877,7 +2220,7 @@ fn lib_reexport_parser_maps_grouped_symbols_and_module_aliases_to_layers() {
     "#;
 
     let tokens = strip_cfg_test_tokens(&tokenize_code(sample));
-    let map = parse_crate_root_reexports(&tokens);
+    let map = parse_crate_root_reexports(&tokens, &ZENCLASH_CORE_LAYERS);
 
     assert_eq!(map.get("service").map(String::as_str), Some("runtime"));
     assert_eq!(map.get("ai_network").map(String::as_str), Some("workflows"));
@@ -1932,7 +2275,14 @@ fn five_layer_dag_detector_catches_explicit_and_reexport_upward_refs_and_ignores
     "#;
     let clean_tokens = strip_cfg_test_tokens(&tokenize_code(clean_storage_source));
     assert!(
-        find_upward_layer_violations(&clean_tokens, "storage", 2, &reexports).is_empty(),
+        find_upward_layer_violations(
+            &clean_tokens,
+            "storage",
+            2,
+            &ZENCLASH_CORE_LAYERS,
+            &reexports,
+        )
+        .is_empty(),
         "downward, same-layer, and #[cfg(test)] references must be allowed"
     );
 
@@ -1952,7 +2302,13 @@ fn five_layer_dag_detector_catches_explicit_and_reexport_upward_refs_and_ignores
         }
     "#;
     let violating_tokens = strip_cfg_test_tokens(&tokenize_code(violating_storage_source));
-    let violations = find_upward_layer_violations(&violating_tokens, "storage", 2, &reexports);
+    let violations = find_upward_layer_violations(
+        &violating_tokens,
+        "storage",
+        2,
+        &ZENCLASH_CORE_LAYERS,
+        &reexports,
+    );
     assert_eq!(violations.len(), 6, "violations: {violations:?}");
     assert!(violations.iter().any(|v| v.contains("crate::workflows")));
     assert!(violations.iter().any(|v| v.contains("crate::runtime")));
@@ -2004,4 +2360,65 @@ fn layer_submodule_ref_extractor_handles_crate_and_super_paths() {
     .map(str::to_owned)
     .collect();
     assert_eq!(refs, expected);
+}
+
+#[test]
+fn horizontal_feature_detector_catches_cross_feature_refs_and_ignores_host_and_cfg_test() {
+    let sibling_features: BTreeSet<String> = [
+        "capture", "home", "kernel", "profiles", "settings", "traffic",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+
+    // Nested file `features/kernel/dns.rs` (depth_in_features = 2).
+    let violating_nested = r#"
+        use crate::features::host::RuntimePage;
+        use crate::features::settings::PreferenceForm;
+        use super::mihomo::MihomoState;
+        use super::super::profiles::ProfileWorkflow;
+
+        #[cfg(test)]
+        mod tests {
+            use crate::features::capture::TunView;
+            use super::super::traffic::TrafficRange;
+        }
+    "#;
+    let nested_tokens = strip_cfg_test_tokens(&tokenize_code(violating_nested));
+    let nested_violations =
+        find_horizontal_feature_violations(&nested_tokens, "kernel", 2, &sibling_features);
+    assert_eq!(
+        nested_violations.len(),
+        2,
+        "violations: {nested_violations:?}"
+    );
+    assert!(nested_violations.iter().any(|v| v.contains("`settings`")));
+    assert!(nested_violations.iter().any(|v| v.contains("`profiles`")));
+
+    // Top-level feature file `features/kernel.rs` (depth_in_features = 1).
+    let violating_top = r#"
+        use crate::features::host::RuntimePage;
+        use super::settings::PreferenceForm;
+
+        #[cfg(test)]
+        fn helper() {
+            let _ = super::home::HomeUiState;
+        }
+    "#;
+    let top_tokens = strip_cfg_test_tokens(&tokenize_code(violating_top));
+    let top_violations =
+        find_horizontal_feature_violations(&top_tokens, "kernel", 1, &sibling_features);
+    assert_eq!(top_violations.len(), 1, "violations: {top_violations:?}");
+    assert!(top_violations[0].contains("`settings`"));
+
+    // Page router `features/host/view.rs` is explicitly allowed to aggregate sibling features.
+    let host_router = r#"
+        use crate::features::settings::PreferenceForm;
+        use super::super::kernel::dns;
+    "#;
+    let host_tokens = strip_cfg_test_tokens(&tokenize_code(host_router));
+    assert!(
+        find_horizontal_feature_violations(&host_tokens, "host", 2, &sibling_features).is_empty(),
+        "`features/host/*` must be allowed to aggregate sibling features"
+    );
 }
