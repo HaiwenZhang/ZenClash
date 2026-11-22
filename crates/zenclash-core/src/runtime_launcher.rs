@@ -94,6 +94,27 @@ pub(crate) enum RuntimeRestoreAuthority {
     Backup(CoreBackupAdmission),
 }
 
+/// Correlates a runtime binding with its accepted configuration generation.
+/// These counters do not identify the owning session or authorize a mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeConfigurationRevision {
+    pub(crate) binding_generation: u64,
+    pub(crate) configuration_generation: u64,
+}
+
+#[derive(Clone)]
+pub(crate) enum ProfileRuntimeSource {
+    File(PathBuf),
+    Frozen(Arc<str>),
+    Prepared(Box<(crate::ControlledConfigUpdate, Option<String>)>),
+}
+
+impl From<PathBuf> for ProfileRuntimeSource {
+    fn from(path: PathBuf) -> Self {
+        Self::File(path)
+    }
+}
+
 /// Controller ownership reported by the current in-memory runtime binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -155,7 +176,7 @@ impl CoreRuntimeDescriptor {
 
 /// Immutable launch metadata exposed by a [`CoreProcessLease`] without tying transport
 /// layers to concrete child-process implementations.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreLaunchDescriptor {
     /// Runtime core implementation.
     pub kind: CoreKind,
@@ -423,9 +444,685 @@ impl LeftoverLeaseTracker {
     }
 }
 
+type LaunchCallback = Arc<
+    dyn Fn(CoreLaunchDescriptor) -> LauncherFuture<'static, MihomoResult<Arc<dyn CoreProcessLease>>>
+        + Send
+        + Sync,
+>;
+
+async fn ensure_reclaimed_before_start_blocking(
+    leftovers: &LeftoverLeaseTracker,
+) -> MihomoResult<()> {
+    if !leftovers.has_pending() {
+        return Ok(());
+    }
+    let tracker = leftovers.clone();
+    tokio::task::spawn_blocking(move || tracker.ensure_reclaimed_before_start())
+        .await
+        .map_err(|error| {
+            MihomoError::Process(format!("leftover reclamation task failed: {error}"))
+        })?
+}
+
+async fn reclaim_all_blocking(leftovers: &LeftoverLeaseTracker) -> MihomoResult<()> {
+    if !leftovers.has_pending() {
+        return Ok(());
+    }
+    let tracker = leftovers.clone();
+    tokio::task::spawn_blocking(move || tracker.reclaim_all())
+        .await
+        .map_err(|error| {
+            MihomoError::Process(format!("leftover reclamation task failed: {error}"))
+        })?
+}
+
+async fn stop_lease_or_register_leftover(
+    leftovers: &LeftoverLeaseTracker,
+    lease: Arc<dyn CoreProcessLease>,
+) -> MihomoResult<()> {
+    let tracker = leftovers.clone();
+    tokio::task::spawn_blocking(move || {
+        if !lease.is_running() {
+            return Ok(());
+        }
+        if let Err(error) = lease.stop_process() {
+            tracker.register(lease);
+            return Err(error);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| MihomoError::Process(format!("managed core stop task failed: {error}")))?
+}
+
+fn blocking_spawn_callback<F>(spawn: F) -> LaunchCallback
+where
+    F: Fn(CoreLaunchDescriptor) -> MihomoResult<Arc<dyn CoreProcessLease>> + Send + Sync + 'static,
+{
+    let spawn = Arc::new(spawn);
+    Arc::new(move |descriptor| {
+        let spawn = Arc::clone(&spawn);
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || spawn(descriptor))
+                .await
+                .map_err(|error| {
+                    MihomoError::Process(format!("core process launch task failed: {error}"))
+                })?
+        })
+    })
+}
+
+/// Concrete zero-privilege local [`CoreProcessLauncher`] adapter gated by a
+/// [`LeftoverLeaseTracker`].
+///
+/// Before spawning a replacement child process, `LocalLauncher` reclaims any
+/// pending leftover leases on a blocking worker thread so two local cores can
+/// never coexist.
+#[derive(Clone)]
+pub struct LocalLauncher {
+    leftovers: LeftoverLeaseTracker,
+    spawn: LaunchCallback,
+}
+
+impl std::fmt::Debug for LocalLauncher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalLauncher")
+            .field("backend", &self.backend_name())
+            .field("pending_leftovers", &self.leftovers.pending_count())
+            .finish()
+    }
+}
+
+impl LocalLauncher {
+    /// Creates a `LocalLauncher` backed by an asynchronous launch callback.
+    #[must_use]
+    pub fn new<F>(leftovers: LeftoverLeaseTracker, spawn: F) -> Self
+    where
+        F: Fn(
+                CoreLaunchDescriptor,
+            ) -> LauncherFuture<'static, MihomoResult<Arc<dyn CoreProcessLease>>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            leftovers,
+            spawn: Arc::new(spawn),
+        }
+    }
+
+    /// Creates a `LocalLauncher` backed by a blocking process-spawn callback executed
+    /// inside [`tokio::task::spawn_blocking`].
+    #[must_use]
+    pub fn with_blocking<F>(leftovers: LeftoverLeaseTracker, spawn: F) -> Self
+    where
+        F: Fn(CoreLaunchDescriptor) -> MihomoResult<Arc<dyn CoreProcessLease>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            leftovers,
+            spawn: blocking_spawn_callback(spawn),
+        }
+    }
+
+    /// Returns the leftover-lease tracker guarding this launcher.
+    #[must_use]
+    pub const fn leftovers(&self) -> &LeftoverLeaseTracker {
+        &self.leftovers
+    }
+}
+
+impl CoreProcessLauncher for LocalLauncher {
+    fn backend_name(&self) -> &'static str {
+        "local"
+    }
+
+    fn launch<'a>(
+        &'a self,
+        descriptor: &'a CoreLaunchDescriptor,
+    ) -> LauncherFuture<'a, MihomoResult<Arc<dyn CoreProcessLease>>> {
+        let descriptor = descriptor.clone();
+        let leftovers = self.leftovers.clone();
+        let spawn = Arc::clone(&self.spawn);
+        Box::pin(async move {
+            ensure_reclaimed_before_start_blocking(&leftovers).await?;
+            spawn(descriptor).await
+        })
+    }
+}
+
+/// Concrete thin privileged-service [`CoreProcessLauncher`] adapter gated by a
+/// [`LeftoverLeaseTracker`].
+///
+/// Encapsulates the user-readable application home and optional trusted core path
+/// shared with the privileged helper, ensuring leftover reclamation precedes every
+/// launch request.
+#[derive(Clone)]
+pub struct ServiceLauncher {
+    source_home: PathBuf,
+    core_source: Option<PathBuf>,
+    leftovers: LeftoverLeaseTracker,
+    spawn: LaunchCallback,
+}
+
+impl std::fmt::Debug for ServiceLauncher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServiceLauncher")
+            .field("backend", &self.backend_name())
+            .field("source_home", &self.source_home)
+            .field("core_source", &self.core_source)
+            .field("pending_leftovers", &self.leftovers.pending_count())
+            .finish()
+    }
+}
+
+impl ServiceLauncher {
+    /// Creates a `ServiceLauncher` backed by an asynchronous helper launch callback.
+    #[must_use]
+    pub fn new<F>(
+        source_home: PathBuf,
+        core_source: Option<PathBuf>,
+        leftovers: LeftoverLeaseTracker,
+        spawn: F,
+    ) -> Self
+    where
+        F: Fn(
+                CoreLaunchDescriptor,
+            ) -> LauncherFuture<'static, MihomoResult<Arc<dyn CoreProcessLease>>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            source_home,
+            core_source,
+            leftovers,
+            spawn: Arc::new(spawn),
+        }
+    }
+
+    /// Creates a `ServiceLauncher` backed by a blocking helper launch callback executed
+    /// inside [`tokio::task::spawn_blocking`].
+    #[must_use]
+    pub fn with_blocking<F>(
+        source_home: PathBuf,
+        core_source: Option<PathBuf>,
+        leftovers: LeftoverLeaseTracker,
+        spawn: F,
+    ) -> Self
+    where
+        F: Fn(CoreLaunchDescriptor) -> MihomoResult<Arc<dyn CoreProcessLease>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            source_home,
+            core_source,
+            leftovers,
+            spawn: blocking_spawn_callback(spawn),
+        }
+    }
+
+    /// Returns the user-readable application home directory bound to this service launcher.
+    #[must_use]
+    pub fn source_home(&self) -> &Path {
+        &self.source_home
+    }
+
+    /// Returns the optional selected core executable path for trusted-path verification.
+    #[must_use]
+    pub fn core_source(&self) -> Option<&Path> {
+        self.core_source.as_deref()
+    }
+
+    /// Returns the leftover-lease tracker guarding this launcher.
+    #[must_use]
+    pub const fn leftovers(&self) -> &LeftoverLeaseTracker {
+        &self.leftovers
+    }
+}
+
+impl CoreProcessLauncher for ServiceLauncher {
+    fn backend_name(&self) -> &'static str {
+        "service"
+    }
+
+    fn launch<'a>(
+        &'a self,
+        descriptor: &'a CoreLaunchDescriptor,
+    ) -> LauncherFuture<'a, MihomoResult<Arc<dyn CoreProcessLease>>> {
+        let descriptor = descriptor.clone();
+        let leftovers = self.leftovers.clone();
+        let spawn = Arc::clone(&self.spawn);
+        Box::pin(async move {
+            ensure_reclaimed_before_start_blocking(&leftovers).await?;
+            spawn(descriptor).await
+        })
+    }
+}
+
+/// Desired lifecycle target state driven by [`IntentReconciler`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesiredCoreIntent {
+    /// Managed core should be running with the supplied launch descriptor.
+    Running(Box<CoreLaunchDescriptor>),
+    /// Managed core should be stopped while keeping the reconciler open for future intents.
+    Stopped,
+    /// Managed core should be stopped permanently; subsequent non-closed intents are rejected.
+    Closed,
+}
+
+impl DesiredCoreIntent {
+    /// Builds a [`DesiredCoreIntent::Running`] intent from a launch descriptor.
+    #[must_use]
+    pub fn running(descriptor: CoreLaunchDescriptor) -> Self {
+        Self::Running(Box::new(descriptor))
+    }
+
+    /// Reports whether this intent requests a running managed core.
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self, Self::Running(_))
+    }
+
+    /// Reports whether this intent requests a stopped core while remaining open.
+    #[must_use]
+    pub const fn is_stopped(&self) -> bool {
+        matches!(self, Self::Stopped)
+    }
+
+    /// Reports whether this intent permanently closes the reconciler.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+}
+
+/// Result of reconciling a [`DesiredCoreIntent`] revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    /// This revision executed a runtime transition and became the committed state.
+    Applied {
+        /// Monotonic revision applied by the reconciler.
+        revision: u64,
+    },
+    /// The runtime already satisfied the desired intent, so no redundant transition ran.
+    Coalesced {
+        /// Monotonic revision satisfied without a transition.
+        revision: u64,
+    },
+    /// A newer desired intent arrived before this revision could commit.
+    Superseded {
+        /// Older revision that was overtaken.
+        revision: u64,
+        /// Latest monotonic revision that superseded it.
+        latest_revision: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommittedCoreState {
+    Stopped,
+    Running(Box<CoreLaunchDescriptor>),
+    Closed,
+}
+
+struct ReconcilerState {
+    latest_revision: u64,
+    applied_revision: u64,
+    desired: DesiredCoreIntent,
+    closed_requested: bool,
+    committed: CommittedCoreState,
+    active_lease: Option<Arc<dyn CoreProcessLease>>,
+}
+
+/// Single-worker latest-desired-intent reconciler with monotonic `revision` tracking
+/// and integrated [`LeftoverLeaseTracker`] gating.
+///
+/// Instead of executing every queued start/stop/restart command serially, callers
+/// submit desired lifecycle targets (`Running | Stopped | Closed`). Rapid intermediate
+/// intents are coalesced or superseded before wasting launches, and any managed lease
+/// whose exit cannot be confirmed is registered in [`LeftoverLeaseTracker`] to block
+/// subsequent `Running` launches until exit is confirmed.
+#[derive(Clone)]
+pub struct IntentReconciler {
+    worker_gate: Arc<tokio::sync::Mutex<()>>,
+    state: Arc<Mutex<ReconcilerState>>,
+    leftovers: LeftoverLeaseTracker,
+}
+
+impl std::fmt::Debug for IntentReconciler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (latest_revision, applied_revision, closed, running) = {
+            let state = self.state.lock();
+            (
+                state.latest_revision,
+                state.applied_revision,
+                state.closed_requested,
+                state.active_lease.is_some(),
+            )
+        };
+        formatter
+            .debug_struct("IntentReconciler")
+            .field("latest_revision", &latest_revision)
+            .field("applied_revision", &applied_revision)
+            .field("closed", &closed)
+            .field("has_active_lease", &running)
+            .field("pending_leftovers", &self.leftovers.pending_count())
+            .finish()
+    }
+}
+
+impl Default for IntentReconciler {
+    fn default() -> Self {
+        Self::new(LeftoverLeaseTracker::new())
+    }
+}
+
+impl IntentReconciler {
+    /// Creates a new reconciler initially in the `Stopped` state, sharing the
+    /// provided [`LeftoverLeaseTracker`].
+    #[must_use]
+    pub fn new(leftovers: LeftoverLeaseTracker) -> Self {
+        Self {
+            worker_gate: Arc::new(tokio::sync::Mutex::new(())),
+            state: Arc::new(Mutex::new(ReconcilerState {
+                latest_revision: 0,
+                applied_revision: 0,
+                desired: DesiredCoreIntent::Stopped,
+                closed_requested: false,
+                committed: CommittedCoreState::Stopped,
+                active_lease: None,
+            })),
+            leftovers,
+        }
+    }
+
+    /// Returns the latest monotonically assigned desired-intent revision.
+    #[must_use]
+    pub fn latest_revision(&self) -> u64 {
+        self.state.lock().latest_revision
+    }
+
+    /// Returns the most recent revision confirmed as applied or coalesced.
+    #[must_use]
+    pub fn applied_revision(&self) -> u64 {
+        self.state.lock().applied_revision
+    }
+
+    /// Returns a clone of the latest desired intent recorded by this reconciler.
+    #[must_use]
+    pub fn desired_intent(&self) -> DesiredCoreIntent {
+        self.state.lock().desired.clone()
+    }
+
+    /// Returns the currently committed active process lease, if any.
+    #[must_use]
+    pub fn active_lease(&self) -> Option<Arc<dyn CoreProcessLease>> {
+        self.state.lock().active_lease.clone()
+    }
+
+    /// Reports whether permanent shutdown (`Closed`) has been requested.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.state.lock().closed_requested
+    }
+
+    /// Returns the [`LeftoverLeaseTracker`] integrated with this reconciler.
+    #[must_use]
+    pub const fn leftovers(&self) -> &LeftoverLeaseTracker {
+        &self.leftovers
+    }
+
+    /// Records a new latest desired intent and returns its monotonically increasing
+    /// revision without waiting for the worker gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`DesiredCoreIntent::Closed`] has already been submitted
+    /// and a non-closed intent is requested.
+    pub fn submit(&self, intent: DesiredCoreIntent) -> MihomoResult<u64> {
+        let mut state = self.state.lock();
+        if state.closed_requested && !intent.is_closed() {
+            return Err(MihomoError::Process(
+                "core intent reconciler is closed; refusing new runtime intent".into(),
+            ));
+        }
+        if intent.is_closed() {
+            state.closed_requested = true;
+        }
+        state.latest_revision = state.latest_revision.saturating_add(1);
+        state.desired = intent;
+        Ok(state.latest_revision)
+    }
+
+    /// Submits `intent` as a new revision and advances the reconciler for that revision.
+    ///
+    /// Returns:
+    /// - [`ReconcileOutcome::Applied`] when this revision executed the state transition;
+    /// - [`ReconcileOutcome::Coalesced`] when the runtime already satisfied `intent`;
+    /// - [`ReconcileOutcome::Superseded`] when a newer revision overtook this one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reconciler is already closed for non-closed intents,
+    /// if an existing or leftover lease cannot be confirmed exited before starting,
+    /// or if the launcher fails to start the core process.
+    pub async fn reconcile(
+        &self,
+        intent: DesiredCoreIntent,
+        launcher: &dyn CoreProcessLauncher,
+    ) -> MihomoResult<ReconcileOutcome> {
+        let revision = self.submit(intent)?;
+        self.reconcile_revision(Some(revision), launcher).await
+    }
+
+    /// Executes one single-worker reconciliation step toward whichever desired intent
+    /// revision is currently latest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stopping an existing lease, reclaiming leftovers, or
+    /// launching the target core fails.
+    pub async fn reconcile_latest(
+        &self,
+        launcher: &dyn CoreProcessLauncher,
+    ) -> MihomoResult<ReconcileOutcome> {
+        self.reconcile_revision(None, launcher).await
+    }
+
+    async fn reconcile_revision(
+        &self,
+        pinned_revision: Option<u64>,
+        launcher: &dyn CoreProcessLauncher,
+    ) -> MihomoResult<ReconcileOutcome> {
+        let _worker = self.worker_gate.lock().await;
+
+        let (target_revision, target_intent, current_committed, current_lease) = {
+            let state = self.state.lock();
+            if let Some(revision) = pinned_revision
+                && state.latest_revision > revision
+            {
+                return Ok(ReconcileOutcome::Superseded {
+                    revision,
+                    latest_revision: state.latest_revision,
+                });
+            }
+            (
+                pinned_revision.unwrap_or(state.latest_revision),
+                state.desired.clone(),
+                state.committed.clone(),
+                state.active_lease.clone(),
+            )
+        };
+
+        match target_intent {
+            DesiredCoreIntent::Stopped | DesiredCoreIntent::Closed => {
+                let target_committed = if target_intent.is_closed() {
+                    CommittedCoreState::Closed
+                } else {
+                    CommittedCoreState::Stopped
+                };
+                self.reconcile_stop_or_close(
+                    target_revision,
+                    target_committed,
+                    current_committed,
+                    current_lease,
+                )
+                .await
+            }
+            DesiredCoreIntent::Running(descriptor) => {
+                self.reconcile_running(
+                    target_revision,
+                    descriptor,
+                    current_committed,
+                    current_lease,
+                    launcher,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn reconcile_stop_or_close(
+        &self,
+        target_revision: u64,
+        target_committed: CommittedCoreState,
+        current_committed: CommittedCoreState,
+        current_lease: Option<Arc<dyn CoreProcessLease>>,
+    ) -> MihomoResult<ReconcileOutcome> {
+        let mut did_work = current_committed != target_committed;
+
+        if let Some(lease) = current_lease {
+            did_work = true;
+            {
+                let mut state = self.state.lock();
+                state.active_lease = None;
+                if state.committed != CommittedCoreState::Closed {
+                    state.committed = CommittedCoreState::Stopped;
+                }
+            }
+            stop_lease_or_register_leftover(&self.leftovers, lease).await?;
+        }
+
+        if self.leftovers.has_pending() {
+            did_work = true;
+            reclaim_all_blocking(&self.leftovers).await?;
+        }
+
+        let mut state = self.state.lock();
+        state.committed = target_committed;
+        if state.latest_revision > target_revision {
+            return Ok(ReconcileOutcome::Superseded {
+                revision: target_revision,
+                latest_revision: state.latest_revision,
+            });
+        }
+        state.applied_revision = target_revision;
+        if did_work {
+            Ok(ReconcileOutcome::Applied {
+                revision: target_revision,
+            })
+        } else {
+            Ok(ReconcileOutcome::Coalesced {
+                revision: target_revision,
+            })
+        }
+    }
+
+    async fn reconcile_running(
+        &self,
+        target_revision: u64,
+        descriptor: Box<CoreLaunchDescriptor>,
+        current_committed: CommittedCoreState,
+        current_lease: Option<Arc<dyn CoreProcessLease>>,
+        launcher: &dyn CoreProcessLauncher,
+    ) -> MihomoResult<ReconcileOutcome> {
+        let already_running_same = current_committed
+            == CommittedCoreState::Running(descriptor.clone())
+            && current_lease
+                .as_ref()
+                .is_some_and(|lease| lease.is_running())
+            && !self.leftovers.has_pending();
+
+        if already_running_same {
+            let mut state = self.state.lock();
+            if state.latest_revision > target_revision {
+                return Ok(ReconcileOutcome::Superseded {
+                    revision: target_revision,
+                    latest_revision: state.latest_revision,
+                });
+            }
+            state.applied_revision = target_revision;
+            return Ok(ReconcileOutcome::Coalesced {
+                revision: target_revision,
+            });
+        }
+
+        if let Some(old_lease) = current_lease {
+            {
+                let mut state = self.state.lock();
+                state.active_lease = None;
+                if state.committed != CommittedCoreState::Closed {
+                    state.committed = CommittedCoreState::Stopped;
+                }
+            }
+            stop_lease_or_register_leftover(&self.leftovers, old_lease).await?;
+        }
+
+        ensure_reclaimed_before_start_blocking(&self.leftovers).await?;
+
+        if let Some(latest_revision) = self.check_superseded(target_revision) {
+            return Ok(ReconcileOutcome::Superseded {
+                revision: target_revision,
+                latest_revision,
+            });
+        }
+
+        let new_lease = launcher.launch(&descriptor).await?;
+
+        let superseded_by = {
+            let mut state = self.state.lock();
+            if state.latest_revision > target_revision || state.closed_requested {
+                Some(state.latest_revision)
+            } else {
+                state.active_lease = Some(Arc::clone(&new_lease));
+                state.committed = CommittedCoreState::Running(descriptor);
+                state.applied_revision = target_revision;
+                None
+            }
+        };
+
+        if let Some(latest_revision) = superseded_by {
+            let _ = stop_lease_or_register_leftover(&self.leftovers, new_lease).await;
+            return Ok(ReconcileOutcome::Superseded {
+                revision: target_revision,
+                latest_revision,
+            });
+        }
+
+        Ok(ReconcileOutcome::Applied {
+            revision: target_revision,
+        })
+    }
+
+    fn check_superseded(&self, target_revision: u64) -> Option<u64> {
+        let state = self.state.lock();
+        (state.latest_revision > target_revision || state.closed_requested)
+            .then_some(state.latest_revision)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -434,48 +1131,63 @@ mod tests {
         fail_stop: AtomicBool,
         stop_calls: AtomicUsize,
         pid: Option<u32>,
+        descriptor: CoreLaunchDescriptor,
     }
 
     impl FakeLease {
         fn new(running: bool, fail_stop: bool, pid: Option<u32>) -> Arc<Self> {
+            Self::with_descriptor(running, fail_stop, pid, sample_descriptor("default"))
+        }
+
+        fn with_descriptor(
+            running: bool,
+            fail_stop: bool,
+            pid: Option<u32>,
+            descriptor: CoreLaunchDescriptor,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 running: AtomicBool::new(running),
                 fail_stop: AtomicBool::new(fail_stop),
                 stop_calls: AtomicUsize::new(0),
                 pid,
+                descriptor,
             })
+        }
+    }
+
+    fn sample_descriptor(tag: &str) -> CoreLaunchDescriptor {
+        CoreLaunchDescriptor {
+            kind: CoreKind::Mihomo,
+            binary: PathBuf::from(format!("/fake/{tag}/mihomo")),
+            config_file: PathBuf::from(format!("/fake/{tag}/config.yaml")),
+            home_dir: PathBuf::from(format!("/fake/{tag}")),
+            endpoint: MihomoEndpoint::new(format!("http://127.0.0.1:9090/{tag}"), "secret"),
+            controller_override: None,
         }
     }
 
     impl CoreProcessLease for FakeLease {
         fn kind(&self) -> CoreKind {
-            CoreKind::Mihomo
+            self.descriptor.kind
         }
 
         fn endpoint(&self) -> MihomoEndpoint {
-            MihomoEndpoint::default()
+            self.descriptor.endpoint.clone()
         }
 
         fn launch_descriptor(&self) -> CoreLaunchDescriptor {
-            CoreLaunchDescriptor {
-                kind: CoreKind::Mihomo,
-                binary: PathBuf::from("/fake/mihomo"),
-                config_file: PathBuf::from("/fake/config.yaml"),
-                home_dir: PathBuf::from("/fake"),
-                endpoint: MihomoEndpoint::default(),
-                controller_override: None,
-            }
+            self.descriptor.clone()
         }
 
         fn write_scopes(&self) -> Vec<PathBuf> {
-            vec![PathBuf::from("/fake")]
+            vec![self.descriptor.home_dir.clone()]
         }
 
         fn config_validator(&self) -> CoreConfigValidator {
             CoreConfigValidator::new(
-                CoreKind::Mihomo,
-                PathBuf::from("/fake/mihomo"),
-                PathBuf::from("/fake"),
+                self.descriptor.kind,
+                self.descriptor.binary.clone(),
+                self.descriptor.home_dir.clone(),
             )
         }
 
@@ -533,5 +1245,416 @@ mod tests {
         tracker.reclaim_all().unwrap();
         assert!(!tracker.has_pending());
         assert_eq!(lease.stop_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn local_and_service_launchers_gate_on_leftovers_before_spawning() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let stuck = FakeLease::new(true, true, Some(1001));
+        leftovers.register(stuck.clone());
+
+        let local_spawns = Arc::new(AtomicUsize::new(0));
+        let local_counter = Arc::clone(&local_spawns);
+        let local = LocalLauncher::with_blocking(leftovers.clone(), move |descriptor| {
+            local_counter.fetch_add(1, Ordering::Relaxed);
+            Ok(FakeLease::with_descriptor(
+                true,
+                false,
+                Some(2001),
+                descriptor,
+            ))
+        });
+        assert_eq!(local.backend_name(), "local");
+
+        let service_spawns = Arc::new(AtomicUsize::new(0));
+        let service_counter = Arc::clone(&service_spawns);
+        let service = ServiceLauncher::with_blocking(
+            PathBuf::from("/fake/home"),
+            Some(PathBuf::from("/fake/mihomo")),
+            leftovers.clone(),
+            move |descriptor| {
+                service_counter.fetch_add(1, Ordering::Relaxed);
+                Ok(FakeLease::with_descriptor(
+                    true,
+                    false,
+                    Some(3001),
+                    descriptor,
+                ))
+            },
+        );
+        assert_eq!(service.backend_name(), "service");
+        assert_eq!(service.source_home(), Path::new("/fake/home"));
+        assert_eq!(service.core_source(), Some(Path::new("/fake/mihomo")));
+
+        let desc = sample_descriptor("alpha");
+        assert!(local.launch(&desc).await.is_err());
+        assert!(service.launch(&desc).await.is_err());
+        assert_eq!(local_spawns.load(Ordering::Relaxed), 0);
+        assert_eq!(service_spawns.load(Ordering::Relaxed), 0);
+
+        // Allow leftover to exit; both launchers now succeed cleanly.
+        stuck.fail_stop.store(false, Ordering::Release);
+        let local_lease = local.launch(&desc).await.unwrap();
+        assert_eq!(local_lease.pid(), Some(2001));
+        assert_eq!(local_spawns.load(Ordering::Relaxed), 1);
+
+        let service_lease = service.launch(&desc).await.unwrap();
+        assert_eq!(service_lease.pid(), Some(3001));
+        assert_eq!(service_spawns.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn reconciler_coalesces_redundant_intents_and_restarts_on_crash_or_change() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let reconciler = IntentReconciler::new(leftovers.clone());
+        let launched = Arc::new(Mutex::new(Vec::<Arc<FakeLease>>::new()));
+        let launched_ref = Arc::clone(&launched);
+        let launcher = LocalLauncher::with_blocking(leftovers, move |descriptor| {
+            let lease = FakeLease::with_descriptor(true, false, Some(500), descriptor);
+            launched_ref.lock().push(Arc::clone(&lease));
+            Ok(lease)
+        });
+
+        // Compile-time check that reconcile futures remain Send.
+        fn assert_send<T: Send>(_: &T) {}
+        let fut = reconciler.reconcile(DesiredCoreIntent::Stopped, &launcher);
+        assert_send(&fut);
+        assert_eq!(
+            fut.await.unwrap(),
+            ReconcileOutcome::Coalesced { revision: 1 }
+        );
+
+        // First Running applies.
+        let desc_a = sample_descriptor("a");
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::running(desc_a.clone()), &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 2 }
+        );
+        assert_eq!(launched.lock().len(), 1);
+
+        // Identical Running while lease is alive coalesces without restarting.
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::running(desc_a.clone()), &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Coalesced { revision: 3 }
+        );
+        assert_eq!(launched.lock().len(), 1);
+
+        // If the lease crashes externally, identical Running does NOT coalesce; it relaunches.
+        launched.lock()[0].running.store(false, Ordering::Release);
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::running(desc_a), &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 4 }
+        );
+        assert_eq!(launched.lock().len(), 2);
+
+        // Changing descriptor stops old lease and launches new one.
+        let desc_b = sample_descriptor("b");
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::running(desc_b), &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 5 }
+        );
+        assert_eq!(launched.lock().len(), 3);
+        assert!(!launched.lock()[1].is_running());
+        assert!(launched.lock()[2].is_running());
+    }
+
+    #[tokio::test]
+    async fn reconciler_supersedes_queued_and_in_flight_intents_without_leaking_leases() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let reconciler = IntentReconciler::new(leftovers.clone());
+
+        let first_launch_entered = Arc::new(Notify::new());
+        let release_first_launch = Arc::new(Notify::new());
+        let launched_tags = Arc::new(Mutex::new(Vec::<(String, Arc<FakeLease>)>::new()));
+
+        let entered = Arc::clone(&first_launch_entered);
+        let release = Arc::clone(&release_first_launch);
+        let tags = Arc::clone(&launched_tags);
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&call_count);
+
+        let launcher = Arc::new(LocalLauncher::new(leftovers, move |descriptor| {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let tags = Arc::clone(&tags);
+            let n = calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                if n == 0 {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+                let tag = descriptor.home_dir.to_string_lossy().into_owned();
+                let lease =
+                    FakeLease::with_descriptor(true, false, Some(600 + n as u32), descriptor);
+                tags.lock().push((tag, Arc::clone(&lease)));
+                Ok(lease as Arc<dyn CoreProcessLease>)
+            })
+        }));
+
+        // Start rev 1 (blocks inside launch).
+        let r1 = reconciler.clone();
+        let l1 = Arc::clone(&launcher);
+        let task1 = tokio::spawn(async move {
+            r1.reconcile(
+                DesiredCoreIntent::running(sample_descriptor("one")),
+                l1.as_ref(),
+            )
+            .await
+        });
+
+        first_launch_entered.notified().await;
+
+        // While rev 1 is in flight, queue rev 2 ("two") then rev 3 ("three").
+        let r2 = reconciler.clone();
+        let l2 = Arc::clone(&launcher);
+        let rev2 = r2
+            .submit(DesiredCoreIntent::running(sample_descriptor("two")))
+            .unwrap();
+        assert_eq!(rev2, 2);
+
+        let rev3 = reconciler
+            .submit(DesiredCoreIntent::running(sample_descriptor("three")))
+            .unwrap();
+        assert_eq!(rev3, 3);
+
+        // Start a task pinned to rev 2 while rev 1 still holds the worker gate.
+        let task2 =
+            tokio::spawn(async move { r2.reconcile_revision(Some(rev2), l2.as_ref()).await });
+
+        // Release rev 1: it must detect superseding, stop its stale lease, and return Superseded.
+        release_first_launch.notify_one();
+        let out1 = task1.await.unwrap().unwrap();
+        assert_eq!(
+            out1,
+            ReconcileOutcome::Superseded {
+                revision: 1,
+                latest_revision: 3,
+            }
+        );
+
+        // Rev 2 must immediately observe superseding by rev 3 and NEVER launch "two".
+        let out2 = task2.await.unwrap().unwrap();
+        assert_eq!(
+            out2,
+            ReconcileOutcome::Superseded {
+                revision: 2,
+                latest_revision: 3,
+            }
+        );
+
+        // Worker steps once to apply latest (rev 3 = "three").
+        let out3 = reconciler
+            .reconcile_latest(launcher.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(out3, ReconcileOutcome::Applied { revision: 3 });
+
+        let recorded = launched_tags.lock();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].0, "/fake/one");
+        assert!(
+            !recorded[0].1.is_running(),
+            "superseded lease must be stopped"
+        );
+        assert_eq!(recorded[1].0, "/fake/three");
+        assert!(recorded[1].1.is_running(), "latest lease must stay active");
+    }
+
+    #[tokio::test]
+    async fn reconciler_gates_new_running_launch_on_unreclaimed_leftover_lease() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let reconciler = IntentReconciler::new(leftovers.clone());
+        let launched = Arc::new(Mutex::new(Vec::<Arc<FakeLease>>::new()));
+        let launched_ref = Arc::clone(&launched);
+
+        let launcher = LocalLauncher::with_blocking(leftovers.clone(), move |descriptor| {
+            let lease = FakeLease::with_descriptor(true, false, Some(700), descriptor);
+            launched_ref.lock().push(Arc::clone(&lease));
+            Ok(lease)
+        });
+
+        // Start initial lease A.
+        assert_eq!(
+            reconciler
+                .reconcile(
+                    DesiredCoreIntent::running(sample_descriptor("a")),
+                    &launcher,
+                )
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 1 }
+        );
+        let first_lease = Arc::clone(&launched.lock()[0]);
+
+        // Make lease A fail to confirm exit.
+        first_lease.fail_stop.store(true, Ordering::Release);
+        assert!(
+            reconciler
+                .reconcile(DesiredCoreIntent::Stopped, &launcher)
+                .await
+                .is_err()
+        );
+        assert!(leftovers.has_pending());
+        assert!(reconciler.active_lease().is_none());
+
+        // Attempt to start lease B while A is still an unreclaimed leftover: MUST fail without spawning B.
+        assert!(
+            reconciler
+                .reconcile(
+                    DesiredCoreIntent::running(sample_descriptor("b")),
+                    &launcher,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            launched.lock().len(),
+            1,
+            "dual kernel launch must be blocked"
+        );
+
+        // Once leftover A confirms exit, starting B reclaims A and launches B.
+        first_lease.fail_stop.store(false, Ordering::Release);
+        assert_eq!(
+            reconciler
+                .reconcile(
+                    DesiredCoreIntent::running(sample_descriptor("b")),
+                    &launcher,
+                )
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 4 }
+        );
+        assert!(!leftovers.has_pending());
+        assert_eq!(launched.lock().len(), 2);
+        assert!(!first_lease.is_running());
+        assert!(launched.lock()[1].is_running());
+    }
+
+    #[tokio::test]
+    async fn reconciler_closed_state_stops_active_lease_and_rejects_future_intents() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let reconciler = IntentReconciler::new(leftovers.clone());
+        let launched = Arc::new(Mutex::new(Vec::<Arc<FakeLease>>::new()));
+        let launched_ref = Arc::clone(&launched);
+
+        let launcher = LocalLauncher::with_blocking(leftovers, move |descriptor| {
+            let lease = FakeLease::with_descriptor(true, false, Some(800), descriptor);
+            launched_ref.lock().push(Arc::clone(&lease));
+            Ok(lease)
+        });
+
+        reconciler
+            .reconcile(
+                DesiredCoreIntent::running(sample_descriptor("run")),
+                &launcher,
+            )
+            .await
+            .unwrap();
+        assert_eq!(launched.lock().len(), 1);
+
+        // Close stops the active lease.
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::Closed, &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Applied { revision: 2 }
+        );
+        assert!(reconciler.is_closed());
+        assert!(!launched.lock()[0].is_running());
+        assert!(reconciler.active_lease().is_none());
+
+        // Repeat Closed coalesces.
+        assert_eq!(
+            reconciler
+                .reconcile(DesiredCoreIntent::Closed, &launcher)
+                .await
+                .unwrap(),
+            ReconcileOutcome::Coalesced { revision: 3 }
+        );
+
+        // Subsequent Running or Stopped intents are rejected.
+        assert!(
+            reconciler
+                .reconcile(
+                    DesiredCoreIntent::running(sample_descriptor("after-close")),
+                    &launcher,
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            reconciler
+                .reconcile(DesiredCoreIntent::Stopped, &launcher)
+                .await
+                .is_err()
+        );
+        assert_eq!(launched.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconciler_batch_submit_jumps_straight_to_latest_revision() {
+        let leftovers = LeftoverLeaseTracker::new();
+        let reconciler = IntentReconciler::new(leftovers.clone());
+        let launched_homes = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let homes_ref = Arc::clone(&launched_homes);
+
+        let launcher = LocalLauncher::with_blocking(leftovers, move |descriptor| {
+            homes_ref.lock().push(descriptor.home_dir.clone());
+            Ok(FakeLease::with_descriptor(
+                true,
+                false,
+                Some(900),
+                descriptor,
+            ))
+        });
+
+        assert_eq!(
+            reconciler
+                .submit(DesiredCoreIntent::running(sample_descriptor("r1")))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            reconciler
+                .submit(DesiredCoreIntent::running(sample_descriptor("r2")))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            reconciler
+                .submit(DesiredCoreIntent::running(sample_descriptor("r3")))
+                .unwrap(),
+            3
+        );
+        assert_eq!(reconciler.latest_revision(), 3);
+        assert_eq!(reconciler.applied_revision(), 0);
+
+        assert_eq!(
+            reconciler.reconcile_latest(&launcher).await.unwrap(),
+            ReconcileOutcome::Applied { revision: 3 }
+        );
+        assert_eq!(reconciler.applied_revision(), 3);
+        assert_eq!(*launched_homes.lock(), vec![PathBuf::from("/fake/r3")]);
+
+        // Reconciling latest again with no change coalesces.
+        assert_eq!(
+            reconciler.reconcile_latest(&launcher).await.unwrap(),
+            ReconcileOutcome::Coalesced { revision: 3 }
+        );
+        assert_eq!(launched_homes.lock().len(), 1);
     }
 }

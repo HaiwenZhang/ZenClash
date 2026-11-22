@@ -12,7 +12,8 @@ use thiserror::Error;
 mod service_commit;
 mod source_preparation;
 mod staging;
-pub(crate) use service_commit::ServiceProfileCommit;
+#[cfg(test)]
+use service_commit::ServiceProfileCommit;
 use staging::{CommittedProfile, ProfileSourceCandidate};
 #[cfg(test)]
 mod tests;
@@ -496,7 +497,7 @@ impl ProfileApplication {
                 &self.controlled,
                 prepared_runtime.map_or_else(
                     || {
-                        crate::profile::ProfileRuntimeSource::Frozen(
+                        crate::runtime_launcher::ProfileRuntimeSource::Frozen(
                             source_candidate.payload().clone(),
                         )
                     },

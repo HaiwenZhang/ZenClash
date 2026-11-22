@@ -35,6 +35,22 @@ impl PreparedConfig {
 
 pub(crate) use super::configuration_application::PreparedLocalConfig;
 
+/// Catalog persistence participant decoupled from `profiles` to keep module
+/// layering strictly acyclic (`profiles -> core_session`).
+pub(crate) trait ServiceProfileCommitParticipant: Send + Sync {
+    fn root(&self) -> &std::path::Path;
+    fn mark_runtime_attempted(&self);
+    fn record_runtime_generation(&self, generation: u64);
+    fn validate<'a>(
+        self: Arc<Self>,
+        lease: &'a DataWriteLease,
+    ) -> crate::runtime_launcher::LauncherFuture<'a, Result<(), CoreSessionError>>;
+    fn commit<'a>(
+        self: Arc<Self>,
+        lease: &'a DataWriteLease,
+    ) -> crate::runtime_launcher::LauncherFuture<'a, Result<(), CoreSessionError>>;
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedServiceTun {
     update: crate::ControlledConfigUpdate,
@@ -46,7 +62,7 @@ pub(crate) struct PreparedServiceTun {
     expected_pending: Option<(u64, PathBuf)>,
     next_config: Option<(Arc<crate::ServiceRuntimeBundle>, CommittedConfig)>,
     store_root: PathBuf,
-    pub(crate) profile_commit: Option<Arc<crate::profiles::application::ServiceProfileCommit>>,
+    pub(crate) profile_commit: Option<Arc<dyn ServiceProfileCommitParticipant>>,
     pub(crate) authorized_store: Option<ControlledConfigStore>,
 }
 
@@ -406,7 +422,7 @@ impl CoreSession {
         let _availability_pause = self.pause_pac_availability();
         let result = async {
             if let Some(profile) = &profile_commit {
-                profile.validate(&lease).await?;
+                Arc::clone(profile).validate(&lease).await?;
             }
             let next_config = prepared_config
                 .as_ref()
@@ -640,7 +656,7 @@ impl CoreSession {
                 // A directory application must not rewrite the controlled layer.
                 // Both writes remain rollbackable until the catalog compare-commit succeeds.
                 match persistence.validate_patch().await {
-                    Ok(()) => profile.commit(&lease).await,
+                    Ok(()) => Arc::clone(profile).commit(&lease).await,
                     Err(error) => Err(error.into()),
                 }
             } else {

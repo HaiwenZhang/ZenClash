@@ -131,6 +131,34 @@ impl ServiceProfileCommit {
     }
 }
 
+impl crate::core_session::service_tun::ServiceProfileCommitParticipant for ServiceProfileCommit {
+    fn root(&self) -> &Path {
+        Self::root(self)
+    }
+
+    fn mark_runtime_attempted(&self) {
+        Self::mark_runtime_attempted(self);
+    }
+
+    fn record_runtime_generation(&self, generation: u64) {
+        Self::record_runtime_generation(self, generation);
+    }
+
+    fn validate<'a>(
+        self: std::sync::Arc<Self>,
+        lease: &'a crate::data_coordinator::DataWriteLease,
+    ) -> crate::runtime_launcher::LauncherFuture<'a, Result<(), CoreSessionError>> {
+        Box::pin(async move { Self::validate(&self, lease).await })
+    }
+
+    fn commit<'a>(
+        self: std::sync::Arc<Self>,
+        lease: &'a crate::data_coordinator::DataWriteLease,
+    ) -> crate::runtime_launcher::LauncherFuture<'a, Result<(), CoreSessionError>> {
+        Box::pin(async move { Self::commit(&self, lease).await })
+    }
+}
+
 impl ProfileApplication {
     /// Applies a managed change, authorizing Service ownership for an effective TUN candidate.
     /// Returns capture facts separately from the directory receipt. Once admitted,

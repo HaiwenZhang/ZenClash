@@ -39,6 +39,7 @@ mod source_composition;
 mod storage;
 use runtime_projection::TunProjection;
 
+pub(crate) use crate::config_pipeline::{normalize_runtime_payload, normalize_runtime_value};
 use runtime_application::{
     AcceptedRuntime, RuntimeMutationGuards, result_label, rollback_cache_and_restart,
     rollback_runtime_cache,
@@ -47,7 +48,6 @@ pub(crate) use runtime_application::{
     RuntimeApplicationTransaction, RuntimeCandidateValidation, RuntimeMutationError,
 };
 use runtime_normalization::normalize_partial_tun_payload;
-pub(crate) use runtime_normalization::{normalize_runtime_payload, normalize_runtime_value};
 
 #[cfg(test)]
 mod tests;

@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 struct Controller {
     endpoint: zenclash_core::MihomoEndpoint,
     readback_started: Arc<AtomicBool>,
-    release: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::watch::Sender<bool>>,
     deletes: Arc<parking_lot::Mutex<Vec<String>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -21,15 +21,15 @@ impl Controller {
             "",
         );
         let readback_started = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(tokio::sync::Notify::new());
+        let (release_tx, _release_rx) = tokio::sync::watch::channel(false);
+        let release = Arc::new(release_tx);
         let deletes = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let (started, gate, recorded) =
             (readback_started.clone(), release.clone(), deletes.clone());
         let task = runtime.spawn(async move {
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let (started, gate, recorded) =
-                    (started.clone(), gate.clone(), recorded.clone());
+                let (started, gate, recorded) = (started.clone(), gate.clone(), recorded.clone());
                 tokio::spawn(async move {
                     let Ok(request) =
                         zenclash_core::test_support::read_controller_request(&mut stream).await
@@ -46,7 +46,8 @@ impl Controller {
                         if is_post_delete_readback {
                             started.store(true, Ordering::Release);
                             if delayed_readback {
-                                gate.notified().await;
+                                let mut rx = gate.subscribe();
+                                let _ = rx.wait_for(|&released| released).await;
                             }
                         }
                         let body = r#"{"connections":[{"id":"readback","metadata":{},"upload":0,"download":0}],"uploadTotal":0,"downloadTotal":0,"memory":0}"#;
@@ -184,7 +185,7 @@ fn old_connection_close_readback_cannot_overwrite_a_new_query_or_runtime(
                 page.error = Some("new error".into());
             })
         });
-        controller.release.notify_one();
+        let _ = controller.release.send_replace(true);
         fixture.settle(cx, &page, |page| !page.core_busy());
         cx.update(|cx| {
             let page = page.read(cx);

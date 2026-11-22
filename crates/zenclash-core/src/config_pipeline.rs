@@ -23,7 +23,6 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     ControlledConfigError, ControlledConfigResult, CoreKind, ListenerPortFallback,
-    controlled_config::normalize_runtime_value,
     listener_fallback::{
         SessionListenerFallback, apply_session_fallbacks_to_value, resolve_conflicts,
     },
@@ -32,6 +31,69 @@ use crate::{
     },
     profiles::MAX_PROFILE_BYTES,
 };
+
+const MIHOMO_GEOX_URLS: [(&str, &str); 3] = [
+    (
+        "geoip",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat",
+    ),
+    (
+        "geosite",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
+    ),
+    (
+        "mmdb",
+        "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb",
+    ),
+];
+
+pub(crate) fn normalize_runtime_value(
+    _kind: CoreKind,
+    document: &mut Value,
+) -> ControlledConfigResult<bool> {
+    let root = document
+        .as_mapping_mut()
+        .ok_or(ControlledConfigError::NotMapping)?;
+    let tun_changed = crate::tun_config::normalize(root);
+    let geox_changed = insert_missing_mihomo_geox_urls(root);
+    Ok(tun_changed || geox_changed)
+}
+
+pub(crate) fn normalize_runtime_payload(
+    kind: CoreKind,
+    payload: String,
+) -> ControlledConfigResult<String> {
+    let mut document = serde_yaml::from_str::<Value>(&payload)?;
+    if !normalize_runtime_value(kind, &mut document)? {
+        return Ok(payload);
+    }
+    let normalized = serde_yaml::to_string(&document)?;
+    if normalized.len() > MAX_PROFILE_BYTES {
+        return Err(ControlledConfigError::TooLarge);
+    }
+    Ok(normalized)
+}
+
+fn insert_missing_mihomo_geox_urls(root: &mut serde_yaml::Mapping) -> bool {
+    let value = root
+        .entry(Value::String("geox-url".into()))
+        .or_insert_with(|| Value::Mapping(serde_yaml::Mapping::new()));
+    if value.is_null() {
+        *value = Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let Value::Mapping(geox_urls) = value else {
+        return false;
+    };
+    let mut changed = false;
+    for (name, url) in MIHOMO_GEOX_URLS {
+        let key = Value::String(name.into());
+        if !geox_urls.contains_key(&key) {
+            geox_urls.insert(key, Value::String(url.into()));
+            changed = true;
+        }
+    }
+    changed
+}
 
 /// Controlled configuration keys eligible for in-place `PATCH /configs` hot updates
 /// without reloading listeners or restarting the core.

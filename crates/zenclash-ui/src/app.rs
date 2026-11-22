@@ -45,7 +45,6 @@ use crate::{
     components::sidebar::Sidebar,
     design::apply_zen_theme,
     pages::{
-        Page,
         proxies::ProxiesPage,
         runtime::{
             PreferencesRestored, ProfileActivated, ProfileCleared, ProxySelectionChanged,

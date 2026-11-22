@@ -270,7 +270,7 @@ pub struct PreparedBackupRestore {
     file_count: usize,
     payload_bytes: u64,
     previous_runtime: Option<(
-        crate::core_session::RuntimeConfigurationRevision,
+        crate::runtime_launcher::RuntimeConfigurationRevision,
         crate::CoreRestoreSnapshot,
     )>,
 }
@@ -290,7 +290,7 @@ impl std::fmt::Debug for PreparedBackupRestore {
 impl PreparedBackupRestore {
     pub(crate) fn retain_runtime(
         &mut self,
-        expected: crate::core_session::RuntimeConfigurationRevision,
+        expected: crate::runtime_launcher::RuntimeConfigurationRevision,
         snapshot: crate::CoreRestoreSnapshot,
     ) {
         self.previous_runtime = Some((expected, snapshot));

@@ -349,7 +349,7 @@ impl MihomoClient {
                 crate::profiles::MAX_PROFILE_BYTES / 1024 / 1024
             )));
         }
-        crate::controlled_config::normalize_runtime_payload(self.current_kind(), payload)
+        crate::config_pipeline::normalize_runtime_payload(self.current_kind(), payload)
             .map_err(|error| MihomoError::InvalidInput(error.to_string()))
     }
 

@@ -131,32 +131,90 @@ mod tests {
     }
 
     #[test]
-    fn every_translation_leaf_contains_chinese_and_english() {
-        let document: Value = serde_yaml::from_str(include_str!("../locales/app.yml"))
-            .expect("translation YAML should parse");
-        validate_translation_tree(&document, "");
+    fn every_translation_leaf_contains_chinese_and_english_with_matching_placeholders() {
+        let locales_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
+        let mut files = std::fs::read_dir(&locales_dir)
+            .expect("locale directory should be readable")
+            .map(|entry| entry.expect("locale entry should be readable").path())
+            .filter(|path| path.extension() == Some(std::ffi::OsStr::new("yml")))
+            .collect::<Vec<_>>();
+        files.sort();
+        assert!(
+            files
+                .iter()
+                .any(|path| path.file_name() == Some(std::ffi::OsStr::new("app.yml"))),
+            "expected app.yml in locales/"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|path| path.file_name() == Some(std::ffi::OsStr::new("ai_network.yml"))),
+            "expected ai_network.yml in locales/"
+        );
+
+        let mut total_leaves = 0usize;
+        for path in files {
+            let file_name = path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("<unknown>");
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {file_name}: {error}"));
+            let document: Value = serde_yaml::from_str(&content).unwrap_or_else(|error| {
+                panic!("translation YAML {file_name} should parse: {error}")
+            });
+            let leaves = validate_translation_tree(&document, file_name, "");
+            assert!(
+                leaves > 0,
+                "locale file {file_name} contains no translation leaves"
+            );
+            total_leaves += leaves;
+        }
+        assert!(total_leaves > 0, "expected at least one translation leaf");
     }
 
-    fn validate_translation_tree(value: &Value, path: &str) {
+    fn placeholders(template: &str) -> std::collections::BTreeSet<&str> {
+        template
+            .split("%{")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+            .collect()
+    }
+
+    fn validate_translation_tree(value: &Value, file_name: &str, path: &str) -> usize {
         let Value::Mapping(mapping) = value else {
-            panic!("translation node {path} should be a mapping");
+            panic!("translation node {file_name}:{path} should be a mapping");
         };
         let zh_key = Value::String(ZH_CN.into());
         let en_key = Value::String(EN.into());
-        if mapping.contains_key(&zh_key) {
+        let is_leaf = mapping.get(&zh_key).is_some_and(Value::is_string)
+            || mapping.get(&en_key).is_some_and(Value::is_string);
+        if is_leaf {
             let zh = mapping
                 .get(&zh_key)
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| panic!("translation {path} is missing {ZH_CN}"));
+                .unwrap_or_else(|| panic!("translation {file_name}:{path} is missing {ZH_CN}"));
             let en = mapping
                 .get(&en_key)
                 .and_then(Value::as_str)
-                .unwrap_or_else(|| panic!("translation {path} is missing {EN}"));
-            assert!(!zh.trim().is_empty(), "translation {path}.{ZH_CN} is empty");
-            assert!(!en.trim().is_empty(), "translation {path}.{EN} is empty");
-            return;
+                .unwrap_or_else(|| panic!("translation {file_name}:{path} is missing {EN}"));
+            assert!(
+                !zh.trim().is_empty(),
+                "translation {file_name}:{path}.{ZH_CN} is empty"
+            );
+            assert!(
+                !en.trim().is_empty(),
+                "translation {file_name}:{path}.{EN} is empty"
+            );
+            assert_eq!(
+                placeholders(zh),
+                placeholders(en),
+                "placeholder mismatch in {file_name}:{path}"
+            );
+            return 1;
         }
 
+        let mut leaves = 0usize;
         for (key, child) in mapping {
             let Some(key) = key.as_str() else {
                 continue;
@@ -169,7 +227,12 @@ mod tests {
             } else {
                 format!("{path}.{key}")
             };
-            validate_translation_tree(child, &child_path);
+            leaves += validate_translation_tree(child, file_name, &child_path);
         }
+        assert!(
+            leaves > 0,
+            "translation branch {file_name}:{path} contains no leaves"
+        );
+        leaves
     }
 }

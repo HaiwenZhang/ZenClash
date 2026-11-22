@@ -12,10 +12,9 @@ use gpui_kit::{
 };
 
 use crate::{
-    actions::{SetDarkTheme, SetLightTheme, ToggleSidebar},
+    actions::{Page, SetDarkTheme, SetLightTheme, ToggleSidebar},
     assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
     design::online_indicator,
-    pages::Page,
 };
 
 pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> Option<String> {
@@ -341,8 +340,8 @@ const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        actions::Page,
         assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
-        pages::Page,
     };
 
     use super::{Sidebar, sidebar_icon_path};

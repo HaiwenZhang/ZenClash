@@ -20,10 +20,10 @@ use std::{
 use parking_lot::RwLock;
 use tokio::runtime::Handle;
 
-pub(crate) use crate::runtime_launcher::RuntimeRestoreAuthority;
 pub use crate::runtime_launcher::{
     CoreApplyKind, CoreBackupAdmission, CoreDataApplicationAdmission,
 };
+pub(crate) use crate::runtime_launcher::{RuntimeConfigurationRevision, RuntimeRestoreAuthority};
 pub use crate::session_errors::CoreSessionError;
 use crate::{
     ControlledConfigError, ControlledConfigStore, CoreKind, ManagedCoreProcess, MihomoClient,
@@ -59,7 +59,6 @@ pub use resources::{CoreResourceAction, ResourceActionReceipt};
 mod permissions;
 mod runtime_revision;
 pub use observation::{CoreObservation, CoreObservationIdentity};
-pub(crate) use runtime_revision::RuntimeConfigurationRevision;
 pub(crate) mod run_state;
 mod service_recovery;
 mod service_startup;

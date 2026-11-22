@@ -7,18 +7,7 @@ use crate::{
     profiles::{MAX_PROFILE_BYTES, read_profile_bytes, validate_clash_yaml_value},
 };
 
-#[derive(Clone)]
-pub(crate) enum ProfileRuntimeSource {
-    File(PathBuf),
-    Frozen(std::sync::Arc<str>),
-    Prepared(Box<(crate::ControlledConfigUpdate, Option<String>)>),
-}
-
-impl From<PathBuf> for ProfileRuntimeSource {
-    fn from(path: PathBuf) -> Self {
-        Self::File(path)
-    }
-}
+pub(crate) use crate::runtime_launcher::ProfileRuntimeSource;
 
 /// One parsed source document from which related effective payloads are composed.
 pub(crate) struct ProfileSourceDocument {

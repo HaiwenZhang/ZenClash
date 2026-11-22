@@ -223,7 +223,7 @@ impl ProfileStore {
             &path,
             &current_payload,
             "恢复订阅索引失败",
-            "重新应用当前配置失败",
+            "重新应用有效配置失败",
         )?;
         Ok(update.previous_record)
     }
