@@ -7,7 +7,7 @@ use gpui_kit::{AppContext, TestAppContext};
 use zenclash_core::{AppPreferences, AppearancePreference};
 use zenclash_ui::foundation::actions::{SetDirectMode, SetGlobalMode};
 use zenclash_ui::outbound_mode::OutboundMode;
-use zenclash_ui::shell::tray::native::{
+use zenclash_ui::shell::tray_native::{
     EnvironmentShell, TrayCommand, TrayMenuState, TrayProfile, TrayProxyGroup, TrayProxyNode,
 };
 use zenclash_ui::test_support::runtime_host::RuntimePageFixture;

@@ -6,7 +6,7 @@ use crate::foundation::design::apply_zen_theme;
 use crate::shell::app::AppServices;
 use crate::shell::app::BootstrappedApplication;
 use crate::shell::app::ZenClashApp;
-use crate::shell::tray::native::NetworkTrayIcon;
+use crate::shell::tray_native::NetworkTrayIcon;
 use gpui_kit::App;
 use gpui_kit::AppContext;
 use gpui_kit::KeyBinding;

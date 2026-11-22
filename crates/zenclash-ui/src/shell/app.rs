@@ -8,13 +8,21 @@ use zenclash_core::{
     CoreSession, LogMonitor, OperationalStatus, ServiceManager, TrafficCaptureSession,
 };
 
+mod actions;
+mod bootstrap;
+mod controllers;
+pub(crate) mod navigation;
+mod tray;
+mod view;
+mod window;
+
 pub use crate::foundation::actions::*;
 use crate::outbound_mode::{OutboundMode, OutboundModeCoordinator};
-pub use crate::shell::bootstrap::{
+pub use bootstrap::{
     create_main_window, create_main_window_with_pending_startup,
     create_main_window_with_service_startup, init, reopen_main_window,
 };
-pub use crate::shell::controllers::system_proxy::finish_native_shutdown;
+pub use controllers::system_proxy::finish_native_shutdown;
 pub use zenclash_app::{
     TrafficHistorySession,
     bootstrap::{AppServices, BootstrappedApplication, RestartRequest},
@@ -28,7 +36,7 @@ use crate::{
         ProxySelectionChanged, RuntimeConfigApplied, RuntimePageServices,
         ServiceRepairRestartRequested,
     },
-    shell::tray::native::NetworkTrayIcon,
+    shell::tray_native::NetworkTrayIcon,
 };
 
 pub(in crate::shell) struct AppCoreHandles {
@@ -63,13 +71,13 @@ pub struct ZenClashApp {
     pub(in crate::shell) sidebar_collapsed: bool,
     pub(in crate::shell) outbound_mode: OutboundModeCoordinator,
     pub(in crate::shell) mode_error: Option<String>,
-    pub(in crate::shell) controller_indicator: crate::shell::view::ControllerIndicator,
+    pub(in crate::shell) controller_indicator: view::ControllerIndicator,
     pub(in crate::shell) focus_handle: gpui_kit::FocusHandle,
     pub(in crate::shell) proxies_page: Entity<ProxiesPage>,
     pub(crate) runtime_page: Entity<RuntimePage>,
-    pub(in crate::shell) shell: crate::shell::window::WindowShellState,
-    pub(in crate::shell) tray: crate::shell::tray::TrayController,
-    pub(in crate::shell) preferences: crate::shell::controllers::preferences::PreferenceController,
+    pub(in crate::shell) shell: window::WindowShellState,
+    pub(in crate::shell) tray: tray::TrayController,
+    pub(in crate::shell) preferences: controllers::preferences::PreferenceController,
     pub(in crate::shell) services: AppCoreHandles,
     pub(in crate::shell) _subscriptions: Vec<Subscription>,
 }
@@ -114,7 +122,7 @@ impl ZenClashApp {
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
         if !initializing {
-            crate::shell::controllers::system_proxy::observe_native_quit(
+            controllers::system_proxy::observe_native_quit(
                 &core_session,
                 &traffic_capture,
                 traffic_history_session.as_ref(),
@@ -258,17 +266,17 @@ impl ZenClashApp {
             sidebar_collapsed: false,
             outbound_mode: OutboundModeCoordinator::new_unsynchronized(OutboundMode::default()),
             mode_error: None,
-            controller_indicator: crate::shell::view::ControllerIndicator::default(),
+            controller_indicator: view::ControllerIndicator::default(),
             focus_handle,
             proxies_page: wired.proxies_page,
             runtime_page: wired.runtime_page,
-            shell: crate::shell::window::WindowShellState::new(
+            shell: window::WindowShellState::new(
                 main_window,
                 wired.restart_after_exit,
                 wired.safe_mode,
             ),
-            tray: crate::shell::tray::TrayController::new(network_tray),
-            preferences: crate::shell::controllers::preferences::PreferenceController::new(
+            tray: tray::TrayController::new(network_tray),
+            preferences: controllers::preferences::PreferenceController::new(
                 preferences_store,
                 preferences,
             ),
@@ -300,7 +308,7 @@ impl ZenClashApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle {
+        if self.shell.quit_state != controllers::system_proxy::QuitState::Idle {
             return;
         }
         let BootstrappedApplication {
@@ -337,7 +345,7 @@ impl ZenClashApp {
         {
             tracing::warn!(%error, "failed to restore traffic tray visibility");
         }
-        if let Err(error) = crate::shell::bootstrap::configure_log_monitor(
+        if let Err(error) = bootstrap::configure_log_monitor(
             &services.log_monitor,
             preferences_store.as_ref(),
             &preferences,
@@ -385,13 +393,13 @@ impl ZenClashApp {
         );
         self.outbound_mode = OutboundModeCoordinator::new_unsynchronized(OutboundMode::default());
         self.mode_error = None;
-        self.controller_indicator = crate::shell::view::ControllerIndicator::default();
+        self.controller_indicator = view::ControllerIndicator::default();
         self.proxies_page = wired.proxies_page;
         self.runtime_page = wired.runtime_page;
         self.services = wired.handles;
         self.shell.restart_after_exit = wired.restart_after_exit;
         self.shell.safe_mode = wired.safe_mode;
-        self.tray = crate::shell::tray::TrayController::new(network_tray);
+        self.tray = tray::TrayController::new(network_tray);
         self.preferences.store = preferences_store;
         self.preferences.current = preferences;
         self._subscriptions = wired.subscriptions;
@@ -535,7 +543,7 @@ impl ZenClashApp {
                 }
                 let controller_indicator = process_changed.then(|| {
                     let snapshot = operational_updates.borrow();
-                    crate::shell::view::ControllerIndicator::from_observation(
+                    view::ControllerIndicator::from_observation(
                         &snapshot.controller,
                         core.generation(),
                     )

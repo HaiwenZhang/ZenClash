@@ -61,7 +61,9 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 zenclash-app = { path = "crates/zenclash-app" }
+zenclash-core = { path = "crates/zenclash-core" }
 zenclash-i18n = { path = "crates/zenclash-i18n" }
+zenclash-service = { path = "crates/zenclash-service" }
 
 # Keep the CI lint policy enforceable from a plain `cargo clippy`.
 # `.github/actions/verify-rust/action.yml` repeats these flags so the exact

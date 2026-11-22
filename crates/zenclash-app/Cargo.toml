@@ -20,9 +20,17 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-zenclash-core = { path = "../zenclash-core" }
+zenclash-core.workspace = true
 zenclash-i18n.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-zenclash-core = { path = "../zenclash-core", features = ["test-support"] }
+zenclash-core = { workspace = true, features = ["test-support"] }
+
+[[test]]
+name = "architecture_guards"
+path = "tests/architecture_guards.rs"
+
+[[test]]
+name = "app_integration"
+path = "tests/app_integration/main.rs"

@@ -90,7 +90,7 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                if this.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle {
+                if this.shell.quit_state != crate::shell::app::controllers::system_proxy::QuitState::Idle {
                     return;
                 }
                 match &result {
@@ -163,7 +163,7 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|error| Err(error.to_string()));
             let _ = this.update(cx, |this, cx| {
-                if this.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle {
+                if this.shell.quit_state != crate::shell::app::controllers::system_proxy::QuitState::Idle {
                     return;
                 }
                 match &result {

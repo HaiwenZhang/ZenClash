@@ -1,10 +1,8 @@
-//! Unified native status tray implementation and shell tray controller.
+//! Shell tray controller, command queues, menu refresh, and runtime observation.
 
 pub(in crate::shell) mod commands;
 pub(in crate::shell) mod controller;
 pub(in crate::shell) mod directories;
-/// Native operating-system status tray icon, menu builder, and command bindings.
-pub mod native;
 pub(in crate::shell) mod proxy_commands;
 pub(in crate::shell) mod queue;
 pub(in crate::shell) mod refresh;

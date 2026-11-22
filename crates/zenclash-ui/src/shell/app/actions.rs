@@ -29,7 +29,7 @@ use crate::foundation::actions::ToggleSidebar;
 use crate::foundation::design::apply_zen_theme;
 use crate::outbound_mode::OutboundMode;
 use crate::shell::app::ZenClashApp;
-use crate::shell::controllers::menu_preferences::MenuPreferenceChange;
+use crate::shell::app::controllers::menu_preferences::MenuPreferenceChange;
 use gpui_kit::Context;
 use gpui_kit::Window;
 use gpui_kit::component::ThemeMode;

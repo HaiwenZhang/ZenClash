@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(target_os = "windows")]
-use crate::shell::tray::native::TrayCommand;
+use crate::shell::tray_native::TrayCommand;
 use crate::test_support::shell_tray::app_test_services;
 use gpui_kit::{px, size};
 
@@ -8,7 +8,7 @@ use gpui_kit::{px, size};
 fn primary_tray_click_restores_the_same_main_window_and_keeps_it_visible(
     cx: &mut gpui_kit::TestAppContext,
 ) {
-    use crate::shell::tray::native::TrayClick;
+    use crate::shell::tray_native::TrayClick;
     use gpui_kit::component::Root;
     let fixture = crate::test_support::RuntimePageFixture::new();
     let services = app_test_services(&fixture);
@@ -77,7 +77,7 @@ fn application_reopen_restores_hidden_main_window(cx: &mut gpui_kit::TestAppCont
     })
     .unwrap();
     assert!(!cx.update(|cx| owner.read(cx).shell.main_window_visible));
-    cx.update(crate::shell::bootstrap::reopen_main_window);
+    cx.update(crate::shell::app::bootstrap::reopen_main_window);
     assert!(cx.update(|cx| owner.read(cx).shell.main_window_visible));
     #[cfg(target_os = "macos")]
     assert!(cx.update(|cx| {
@@ -88,7 +88,7 @@ fn application_reopen_restores_hidden_main_window(cx: &mut gpui_kit::TestAppCont
             .restore_size
             .is_none()
     }));
-    cx.update(crate::shell::bootstrap::reopen_main_window);
+    cx.update(crate::shell::app::bootstrap::reopen_main_window);
     assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     cx.update_window(main.into(), |_, window, _| window.remove_window())
         .unwrap();
@@ -121,7 +121,7 @@ fn caption_close_keeps_app_alive_and_tray_show_restores_the_same_window(
         assert!(!owner.read(cx).shell.main_window_visible);
         assert_eq!(
             owner.read(cx).shell.quit_state,
-            crate::shell::controllers::system_proxy::QuitState::Idle
+            crate::shell::app::controllers::system_proxy::QuitState::Idle
         );
     })
     .unwrap();
@@ -159,7 +159,7 @@ fn native_close_keeps_app_alive_and_reopen_restores_the_same_window(
     // The headless platform has no native close-event dispatcher. Exercise
     // the exact production callback, including its veto of window removal.
     cx.update_window(main.into(), |_, window, cx| {
-        assert!(!crate::shell::bootstrap::retain_main_window_on_close(
+        assert!(!crate::shell::app::bootstrap::retain_main_window_on_close(
             window,
             &owner.downgrade(),
             cx
@@ -167,11 +167,11 @@ fn native_close_keeps_app_alive_and_reopen_restores_the_same_window(
         assert!(!owner.read(cx).shell.main_window_visible);
         assert_eq!(
             owner.read(cx).shell.quit_state,
-            crate::shell::controllers::system_proxy::QuitState::Idle
+            crate::shell::app::controllers::system_proxy::QuitState::Idle
         );
     })
     .unwrap();
-    cx.update(crate::shell::bootstrap::reopen_main_window);
+    cx.update(crate::shell::app::bootstrap::reopen_main_window);
     cx.update(|cx| {
         assert_eq!(cx.windows().len(), 1);
         assert!(owner.read(cx).shell.main_window_visible);
@@ -220,7 +220,7 @@ fn taskbar_activation_restores_hidden_main_window_data(cx: &mut gpui_kit::TestAp
         assert_eq!(owner.read(cx).shell.main_window, main.into());
         assert_eq!(
             owner.read(cx).shell.quit_state,
-            crate::shell::controllers::system_proxy::QuitState::Idle
+            crate::shell::app::controllers::system_proxy::QuitState::Idle
         );
     });
     cx.update_window(main.into(), |_, window, _| window.remove_window())

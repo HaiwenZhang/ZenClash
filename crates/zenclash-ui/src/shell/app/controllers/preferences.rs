@@ -9,7 +9,7 @@ use crate::foundation::design::apply_zen_theme;
 use crate::runtime_host::services::PreferenceScope;
 use crate::runtime_host::services::PreferencesRestored;
 use crate::shell::app::ZenClashApp;
-use crate::shell::bootstrap;
+use crate::shell::app::bootstrap;
 use gpui_kit::Context;
 use gpui_kit::component::ThemeMode;
 use zenclash_core::AppearancePreference;
@@ -35,7 +35,7 @@ pub(in crate::shell) struct PreferenceController {
     pub(in crate::shell) current: AppPreferences,
     pub(in crate::shell) save_task: Option<tokio::task::JoinHandle<()>>,
     pub(in crate::shell) menu_saves:
-        crate::shell::controllers::menu_preferences::MenuPreferenceSaves,
+        crate::shell::app::controllers::menu_preferences::MenuPreferenceSaves,
     pub(in crate::shell) reconciliation_read: Option<PreferenceReconciliationRead>,
 }
 

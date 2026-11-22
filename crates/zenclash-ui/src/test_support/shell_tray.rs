@@ -284,22 +284,22 @@ pub fn app_outbound_mode(
 ///
 /// Returns an error if constructing any native tray menu item fails.
 pub fn build_tray_menu_commands(
-    state: &crate::shell::tray::native::TrayMenuState,
-) -> Result<HashMap<String, crate::shell::tray::native::TrayCommand>, String> {
-    crate::shell::tray::native::build_menu_commands_for_test(state)
+    state: &crate::shell::tray_native::TrayMenuState,
+) -> Result<HashMap<String, crate::shell::tray_native::TrayCommand>, String> {
+    crate::shell::tray_native::build_menu_commands_for_test(state)
 }
 
 /// Black-box test harness around the native tray menu command-to-observation bindings.
-pub struct TrayCommandBindingHarness(crate::shell::tray::native::TrayCommandBindingsForTest);
+pub struct TrayCommandBindingHarness(crate::shell::tray_native::TrayCommandBindingsForTest);
 
 impl TrayCommandBindingHarness {
     /// Creates a binding table associating `commands` with an optional observation identity.
     #[must_use]
     pub fn new(
-        commands: HashMap<String, crate::shell::tray::native::TrayCommand>,
+        commands: HashMap<String, crate::shell::tray_native::TrayCommand>,
         observation: Option<zenclash_core::CoreObservationIdentity>,
     ) -> Self {
-        Self(crate::shell::tray::native::TrayCommandBindingsForTest::new(
+        Self(crate::shell::tray_native::TrayCommandBindingsForTest::new(
             commands,
             observation,
         ))
@@ -319,7 +319,7 @@ impl TrayCommandBindingHarness {
         &self,
         id: &str,
     ) -> Option<(
-        crate::shell::tray::native::TrayCommand,
+        crate::shell::tray_native::TrayCommand,
         Option<zenclash_core::CoreObservationIdentity>,
     )> {
         self.0.resolve_command(id)

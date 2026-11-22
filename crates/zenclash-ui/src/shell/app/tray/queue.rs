@@ -41,7 +41,7 @@ impl<T> LatestCommandQueue<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::shell::tray::LatestCommandQueue;
+    use crate::shell::app::tray::LatestCommandQueue;
 
     #[test]
     fn idle_queue_starts_a_command_immediately() {

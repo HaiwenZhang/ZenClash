@@ -1,8 +1,8 @@
 use crate::shell::app::ZenClashApp;
-use crate::shell::tray::native::{
+use crate::shell::app::tray::{LatestCommandQueue, proxy_commands};
+use crate::shell::tray_native::{
     NetworkTrayIcon, TrayClick, TrayCommand, TrayEvent, TrayMenuState,
 };
-use crate::shell::tray::{LatestCommandQueue, proxy_commands};
 use gpui_kit::Context;
 
 /// Consolidates native tray icon ownership, menu snapshots, refresh state, and command queues.

@@ -3,25 +3,28 @@
 //! the `zenclash-ui` 5-layer layout redesign).
 //!
 //! Pure-Rust static analysis using only `std` (zero external crates) to enforce:
-//! 1. Zero direct bidirectional top-level module cycles in `zenclash-core` and `zenclash-ui`.
+//! 1. Zero direct bidirectional top-level module cycles across all four business crates
+//!    (`zenclash-service`, `zenclash-core`, `zenclash-app`, `zenclash-ui`).
 //! 2. Full transitive closure of `zenclash-ui`'s `foundation` and `components` never reaches
 //!    `runtime_host`, `features`, or `shell`.
 //! 3. Zero runtime `ProfileStore::discover` / `YamlOverrideStore::discover` calls outside
 //!    `zenclash-app/src/bootstrap/`.
 //! 4. Zero GUI dependencies (`gpui-kit`, `tray-icon`, `objc2`) in `zenclash-app`.
 //! 5. Disjoint `HOT_UPDATE_CONFIG_KEYS` and `FULL_RELOAD_CONFIG_KEYS` in `zenclash-core`.
-//! 6. Workspace-wide Rust 2024 no-`mod.rs` module layout under `crates/*/src/`.
+//! 6. Workspace-wide Rust 2024 no-`mod.rs` module layout across all of `crates/`
+//!    (`src/` and `tests/`).
 //! 7. Strict 5-layer top-level layout in `crates/zenclash-core/src/`.
 //! 8. Strict 5-layer downward-only DAG in `zenclash-core` (catching both explicit layer paths
 //!    and crate-root re-export shortcuts) plus zero bidirectional submodule cycles inside
-//!    `platform`, `storage`, and `workflows`.
+//!    `platform`, `mihomo`, `storage`, and `workflows`.
 //! 9. Strict 5-layer top-level layout in `crates/zenclash-ui/src/`.
 //! 10. Strict 5-layer downward-only DAG in `zenclash-ui` (catching both explicit layer paths
 //!     and crate-root re-export shortcuts) plus zero bidirectional submodule cycles inside
-//!     `foundation`, `components`, and `runtime_host`.
+//!     `foundation`, `components`, `runtime_host`, and `shell`.
 //! 11. Horizontal isolation across sibling features under `crates/zenclash-ui/src/features/`
 //!     (except `features/host`).
-//! 12. Zero empty directories under `crates/zenclash-ui/src/`.
+//! 12. Zero empty directories anywhere under `crates/` (including `crates/zenclash-ui/src/`).
+//! 13. Zero `once_cell` dependency in `crates/zenclash-service/Cargo.toml`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,7 +36,8 @@ use std::{
 use zenclash_core::{FULL_RELOAD_CONFIG_KEYS, HOT_UPDATE_CONFIG_KEYS};
 
 const ZENCLASH_CORE_LAYERS: [&str; 5] = ["platform", "mihomo", "storage", "runtime", "workflows"];
-const ZENCLASH_CORE_STRICTLY_ACYCLIC_LAYERS: [&str; 3] = ["platform", "storage", "workflows"];
+const ZENCLASH_CORE_STRICTLY_ACYCLIC_LAYERS: [&str; 4] =
+    ["platform", "mihomo", "storage", "workflows"];
 const ZENCLASH_UI_LAYERS: [&str; 5] = [
     "foundation",
     "components",
@@ -41,7 +45,8 @@ const ZENCLASH_UI_LAYERS: [&str; 5] = [
     "features",
     "shell",
 ];
-const ZENCLASH_UI_STRICTLY_ACYCLIC_LAYERS: [&str; 3] = ["foundation", "components", "runtime_host"];
+const ZENCLASH_UI_STRICTLY_ACYCLIC_LAYERS: [&str; 4] =
+    ["foundation", "components", "runtime_host", "shell"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Token {
@@ -61,7 +66,12 @@ fn zero_bidirectional_module_cycles_in_core_and_ui() {
     let root = workspace_root();
     let mut all_violations = Vec::new();
 
-    for crate_name in ["zenclash-core", "zenclash-ui"] {
+    for crate_name in [
+        "zenclash-service",
+        "zenclash-core",
+        "zenclash-app",
+        "zenclash-ui",
+    ] {
         let src_dir = root.join("crates").join(crate_name).join("src");
         let graph = build_top_level_dependency_graph(&src_dir);
         assert!(
@@ -297,41 +307,26 @@ fn controlled_config_hot_update_and_full_reload_keys_are_disjoint() {
 fn workspace_src_uses_rust_2024_no_mod_rs_style() {
     let root = workspace_root();
     let crates_dir = root.join("crates");
-    let mut crate_src_dirs = Vec::new();
-    let entries = fs::read_dir(&crates_dir)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", crates_dir.display()));
-    for entry in entries {
-        let path = entry.expect("directory entry should be readable").path();
-        if path.is_dir() {
-            let src_dir = path.join("src");
-            if src_dir.is_dir() {
-                crate_src_dirs.push(src_dir);
-            }
-        }
-    }
-    crate_src_dirs.sort();
+    let mut files = Vec::new();
+    collect_rs_files(&crates_dir, &mut files);
+    files.sort();
     assert!(
-        !crate_src_dirs.is_empty(),
-        "expected at least one workspace crate with a `src/` directory under {}",
+        !files.is_empty(),
+        "expected Rust source files under {}",
         crates_dir.display()
     );
 
     let mut violations = Vec::new();
-    for src_dir in crate_src_dirs {
-        let mut files = Vec::new();
-        collect_rs_files(&src_dir, &mut files);
-        files.sort();
-        for file in files {
-            if file.file_name() == Some(OsStr::new("mod.rs")) {
-                let rel = file.strip_prefix(&root).unwrap_or(&file);
-                violations.push(rel.display().to_string());
-            }
+    for file in files {
+        if file.file_name() == Some(OsStr::new("mod.rs")) {
+            let rel = file.strip_prefix(&root).unwrap_or(&file);
+            violations.push(rel.display().to_string());
         }
     }
 
     assert!(
         violations.is_empty(),
-        "legacy `mod.rs` files found under `crates/*/src/` (use Rust 2024 `<name>.rs` + `<name>/` style instead):\n{}",
+        "legacy `mod.rs` files found under `crates/` (use Rust 2024 `<name>.rs` + `<name>/` style instead):\n{}",
         violations.join("\n")
     );
 }
@@ -785,6 +780,49 @@ fn zenclash_ui_has_zero_empty_source_directories() {
         formatted.is_empty(),
         "empty source directories found under `crates/zenclash-ui/src/`:\n{}",
         formatted.join("\n")
+    );
+}
+
+#[test]
+fn workspace_has_zero_empty_directories() {
+    let root = workspace_root();
+    let crates_dir = root.join("crates");
+    let mut empty_dirs = Vec::new();
+    collect_empty_dirs(&crates_dir, &mut empty_dirs);
+    empty_dirs.sort();
+
+    let formatted = empty_dirs
+        .iter()
+        .map(|dir| dir.strip_prefix(&root).unwrap_or(dir).display().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        formatted.is_empty(),
+        "empty directories found under `crates/`:\n{}",
+        formatted.join("\n")
+    );
+}
+
+#[test]
+fn zenclash_service_has_no_once_cell_dependency() {
+    let cargo_toml = workspace_root().join("crates/zenclash-service/Cargo.toml");
+    let manifest = fs::read_to_string(&cargo_toml)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", cargo_toml.display()));
+    let mut violations = Vec::new();
+    for (line_number, line) in manifest.lines().enumerate() {
+        let active = line.split('#').next().unwrap_or("");
+        if active.contains("once_cell") || active.contains("once-cell") {
+            violations.push(format!(
+                "crates/zenclash-service/Cargo.toml:{}: references `once_cell`",
+                line_number + 1
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "deprecated `once_cell` dependency found in `zenclash-service` (use `std::sync::OnceLock` instead):\n{}",
+        violations.join("\n")
     );
 }
 

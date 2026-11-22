@@ -23,7 +23,7 @@ pub mod test_support;
 
 pub use foundation::{actions, assets, design};
 pub use shell::app;
-pub use shell::tray::native as tray;
+pub use shell::tray_native as tray;
 
 pub(crate) use zenclash_app::commands as application_commands;
 pub use zenclash_app::{ApplicationCommands, outbound_mode};

@@ -47,7 +47,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tray-icon.workspace = true
 zenclash-app.workspace = true
-zenclash-core = { path = "../zenclash-core" }
+zenclash-core.workspace = true
 zenclash-i18n.workspace = true
 
 [build-dependencies]
@@ -84,8 +84,8 @@ objc2-foundation = { workspace = true, features = [
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-zenclash-app = { path = "../zenclash-app", features = ["test-support"] }
-zenclash-core = { path = "../zenclash-core", features = ["test-support"] }
+zenclash-app = { workspace = true, features = ["test-support"] }
+zenclash-core = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # StatusNotifier activation emits primary clicks so they can restore the main window.

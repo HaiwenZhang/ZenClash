@@ -47,7 +47,7 @@ tracing.workspace = true
 url.workspace = true
 zip.workspace = true
 zenclash-i18n.workspace = true
-zenclash-service = { path = "../zenclash-service", features = ["client"] }
+zenclash-service = { workspace = true, features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8.1"

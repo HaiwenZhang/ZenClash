@@ -15,7 +15,7 @@ pub(in crate::shell) struct WindowShellState {
     pub(in crate::shell) main_window_visible: bool,
     #[cfg(target_os = "macos")]
     pub(in crate::shell) main_window_restore_size: MainWindowRestoreSize,
-    pub(in crate::shell) quit_state: crate::shell::controllers::system_proxy::QuitState,
+    pub(in crate::shell) quit_state: crate::shell::app::controllers::system_proxy::QuitState,
     pub(in crate::shell) restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
     pub(in crate::shell) safe_mode: zenclash_app::SafeMode,
     pub(in crate::shell) tasks: Vec<gpui_kit::Task<()>>,
@@ -32,7 +32,7 @@ impl WindowShellState {
             main_window_visible: true,
             #[cfg(target_os = "macos")]
             main_window_restore_size: MainWindowRestoreSize::default(),
-            quit_state: crate::shell::controllers::system_proxy::QuitState::default(),
+            quit_state: crate::shell::app::controllers::system_proxy::QuitState::default(),
             restart_after_exit,
             safe_mode,
             tasks: Vec::new(),

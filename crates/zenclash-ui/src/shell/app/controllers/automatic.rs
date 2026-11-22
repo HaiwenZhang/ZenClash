@@ -11,7 +11,7 @@ use zenclash_app::automatic::{
 use zenclash_core::NetworkReachability;
 
 use crate::shell::app::ZenClashApp;
-use crate::shell::controllers::system_proxy::QuitState;
+use crate::shell::app::controllers::system_proxy::QuitState;
 
 impl ZenClashApp {
     pub(in crate::shell) fn start_service_handoff(&mut self, cx: &mut Context<Self>) {

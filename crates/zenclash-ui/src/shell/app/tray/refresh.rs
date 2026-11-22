@@ -1,15 +1,15 @@
 use crate::foundation::primitives::runtime_read_source::RuntimeReadSource;
 use crate::outbound_mode::OutboundMode;
 use crate::shell::app::ZenClashApp;
-use crate::shell::tray::native::TrayMenuState;
-use crate::shell::tray::native::TrayProfile;
-use crate::shell::tray::native::TrayProxyGroup;
-use crate::shell::tray::native::TrayProxyNode;
-use crate::shell::tray::runtime_observation::TrayRuntimeObservation;
+use crate::shell::app::tray::runtime_observation::TrayRuntimeObservation;
+use crate::shell::tray_native::TrayMenuState;
+use crate::shell::tray_native::TrayProfile;
+use crate::shell::tray_native::TrayProxyGroup;
+use crate::shell::tray_native::TrayProxyNode;
 use gpui_kit::Context;
 use zenclash_core::{CoreObservationIdentity, Observation, ProxyGroupBehavior};
 
-use crate::shell::tray::directories::load_profile_catalog_and_directories;
+use crate::shell::app::tray::directories::load_profile_catalog_and_directories;
 
 struct TrayMenuSnapshot {
     config: zenclash_core::RuntimeConfig,
@@ -273,7 +273,7 @@ fn bounded_tray_proxy_nodes(
     proxies: &[zenclash_core::ProxyNodeId],
     current: &str,
 ) -> (Vec<TrayProxyNode>, bool) {
-    let limit = crate::shell::tray::native::MAX_TRAY_PROXY_NODES;
+    let limit = crate::shell::tray_native::MAX_TRAY_PROXY_NODES;
     let has_more = proxies.len() > limit;
     let current_index = has_more
         .then(|| {
@@ -332,7 +332,7 @@ mod tests {
                 nodes.iter().any(|node| node.name == "node-29"),
                 has_more,
             ),
-            (crate::shell::tray::native::MAX_TRAY_PROXY_NODES, true, true)
+            (crate::shell::tray_native::MAX_TRAY_PROXY_NODES, true, true)
         );
     }
 }

@@ -7,7 +7,6 @@ use gpui_kit::Window;
 use serde_json::{Map, Value};
 
 mod codec;
-#[path = "config_inputs/core.rs"]
 mod core;
 mod fields;
 mod read_identity;
@@ -274,5 +273,4 @@ pub(crate) fn config_source(config: &Value, keys: &[&str]) -> Value {
 mod tests;
 
 #[cfg(test)]
-#[path = "config_inputs/ui_tests.rs"]
 mod ui_tests;

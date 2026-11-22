@@ -1,4 +1,4 @@
-use crate::shell::tray::native::TrayCommand;
+use crate::shell::tray_native::TrayCommand;
 use crate::test_support::shell_tray::{TrayController, open_app};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, TestAppContext};

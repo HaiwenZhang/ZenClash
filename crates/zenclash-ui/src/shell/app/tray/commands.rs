@@ -5,8 +5,8 @@ use crate::foundation::actions::Page;
 use crate::outbound_mode::OutboundMode;
 use crate::shell::app::ZenClashApp;
 use crate::shell::platform::open_directory;
-use crate::shell::tray::native::EnvironmentShell;
-use crate::shell::tray::native::TrayCommand;
+use crate::shell::tray_native::EnvironmentShell;
+use crate::shell::tray_native::TrayCommand;
 use gpui_kit::ClipboardItem;
 use gpui_kit::Context;
 
@@ -25,7 +25,7 @@ impl ZenClashApp {
         observation: Option<CoreObservationIdentity>,
         cx: &mut Context<Self>,
     ) {
-        if self.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle
+        if self.shell.quit_state != crate::shell::app::controllers::system_proxy::QuitState::Idle
             && !matches!(command, TrayCommand::Quit | TrayCommand::ShowWindow)
         {
             return;
@@ -133,7 +133,8 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle
+                if this.shell.quit_state
+                    != crate::shell::app::controllers::system_proxy::QuitState::Idle
                 {
                     return;
                 }
@@ -243,7 +244,8 @@ impl ZenClashApp {
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
-                if this.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle
+                if this.shell.quit_state
+                    != crate::shell::app::controllers::system_proxy::QuitState::Idle
                 {
                     return;
                 }
@@ -306,7 +308,8 @@ impl ZenClashApp {
                 })
                 .and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
-                if this.shell.quit_state != crate::shell::controllers::system_proxy::QuitState::Idle
+                if this.shell.quit_state
+                    != crate::shell::app::controllers::system_proxy::QuitState::Idle
                 {
                     return;
                 }
@@ -367,7 +370,7 @@ fn proxy_environment(shell: EnvironmentShell, port: u16) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::proxy_environment;
-    use crate::shell::tray::native::EnvironmentShell;
+    use crate::shell::tray_native::EnvironmentShell;
 
     #[gpui_kit::test]
     fn admitting_a_queued_retry_removes_the_previous_tray_error(cx: &mut gpui_kit::TestAppContext) {
