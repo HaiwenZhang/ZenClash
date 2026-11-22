@@ -1,4 +1,5 @@
-//! CI static architecture boundary guards (Section 6.1 of the v2.0 redesign).
+//! CI static architecture boundary guards (Section 6.1 of the v2.0 redesign and
+//! Section 5 of the `zenclash-core` 5-layer layout redesign).
 //!
 //! Pure-Rust static analysis using only `std` (zero external crates) to enforce:
 //! 1. Zero direct bidirectional top-level module cycles in `zenclash-core` and `zenclash-ui`.
@@ -8,6 +9,11 @@
 //!    `zenclash-app/src/bootstrap/`.
 //! 4. Zero GUI dependencies (`gpui-kit`, `tray-icon`, `objc2`) in `zenclash-app`.
 //! 5. Disjoint `HOT_UPDATE_CONFIG_KEYS` and `FULL_RELOAD_CONFIG_KEYS` in `zenclash-core`.
+//! 6. Workspace-wide Rust 2024 no-`mod.rs` module layout under `crates/*/src/`.
+//! 7. Strict 5-layer top-level layout in `crates/zenclash-core/src/`.
+//! 8. Strict 5-layer downward-only DAG in `zenclash-core` (catching both explicit layer paths
+//!    and crate-root re-export shortcuts) plus zero bidirectional submodule cycles inside
+//!    `platform`, `storage`, and `workflows`.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,6 +23,9 @@ use std::{
 };
 
 use zenclash_core::{FULL_RELOAD_CONFIG_KEYS, HOT_UPDATE_CONFIG_KEYS};
+
+const ZENCLASH_CORE_LAYERS: [&str; 5] = ["platform", "mihomo", "storage", "runtime", "workflows"];
+const ZENCLASH_CORE_STRICTLY_ACYCLIC_LAYERS: [&str; 3] = ["platform", "storage", "workflows"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Token {
@@ -265,6 +274,225 @@ fn controlled_config_hot_update_and_full_reload_keys_are_disjoint() {
     assert!(
         overlap.is_empty(),
         "HOT_UPDATE_CONFIG_KEYS and FULL_RELOAD_CONFIG_KEYS must be disjoint, found overlap: {overlap:?}"
+    );
+}
+
+#[test]
+fn workspace_src_uses_rust_2024_no_mod_rs_style() {
+    let root = workspace_root();
+    let crates_dir = root.join("crates");
+    let mut crate_src_dirs = Vec::new();
+    let entries = fs::read_dir(&crates_dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", crates_dir.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry should be readable").path();
+        if path.is_dir() {
+            let src_dir = path.join("src");
+            if src_dir.is_dir() {
+                crate_src_dirs.push(src_dir);
+            }
+        }
+    }
+    crate_src_dirs.sort();
+    assert!(
+        !crate_src_dirs.is_empty(),
+        "expected at least one workspace crate with a `src/` directory under {}",
+        crates_dir.display()
+    );
+
+    let mut violations = Vec::new();
+    for src_dir in crate_src_dirs {
+        let mut files = Vec::new();
+        collect_rs_files(&src_dir, &mut files);
+        files.sort();
+        for file in files {
+            if file.file_name() == Some(OsStr::new("mod.rs")) {
+                let rel = file.strip_prefix(&root).unwrap_or(&file);
+                violations.push(rel.display().to_string());
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "legacy `mod.rs` files found under `crates/*/src/` (use Rust 2024 `<name>.rs` + `<name>/` style instead):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn zenclash_core_top_level_layout_is_strictly_five_layers() {
+    let core_src = workspace_root().join("crates/zenclash-core/src");
+    let allowed: BTreeSet<&str> = [
+        "lib.rs",
+        "platform",
+        "platform.rs",
+        "mihomo",
+        "mihomo.rs",
+        "storage",
+        "storage.rs",
+        "runtime",
+        "runtime.rs",
+        "workflows",
+        "workflows.rs",
+        "test_support",
+        "test_support.rs",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut unexpected = Vec::new();
+    let entries = fs::read_dir(&core_src)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", core_src.display()));
+    for entry in entries {
+        let path = entry.expect("directory entry should be readable").path();
+        let name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or_else(|| panic!("non-UTF-8 entry in {}", core_src.display()));
+        if !allowed.contains(name) {
+            unexpected.push(name.to_owned());
+        }
+    }
+    unexpected.sort();
+
+    let mut missing = Vec::new();
+    if !core_src.join("lib.rs").is_file() {
+        missing.push("lib.rs (file)".to_owned());
+    }
+    for layer in ZENCLASH_CORE_LAYERS {
+        if !core_src.join(format!("{layer}.rs")).is_file() {
+            missing.push(format!("{layer}.rs (file)"));
+        }
+        if !core_src.join(layer).is_dir() {
+            missing.push(format!("{layer}/ (directory)"));
+        }
+    }
+
+    assert!(
+        unexpected.is_empty() && missing.is_empty(),
+        "crates/zenclash-core/src/ top-level layout mismatch:\n  unexpected: {unexpected:?}\n  missing: {missing:?}"
+    );
+}
+
+#[test]
+fn zenclash_core_enforces_strict_five_layer_dag() {
+    let root = workspace_root();
+    let core_src = root.join("crates/zenclash-core/src");
+    let lib_rs = core_src.join("lib.rs");
+    let lib_source = fs::read_to_string(&lib_rs)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", lib_rs.display()));
+    let lib_tokens = strip_cfg_test_tokens(&tokenize_code(&lib_source));
+    let reexports = parse_crate_root_reexports(&lib_tokens);
+
+    assert!(
+        !reexports.is_empty(),
+        "expected crate-root re-exports parsed from {}",
+        lib_rs.display()
+    );
+    assert_eq!(
+        reexports.get("service").map(String::as_str),
+        Some("runtime"),
+        "expected `pub use runtime::service::ipc as service;` to map `service` -> `runtime`"
+    );
+    assert_eq!(
+        reexports.get("ai_network").map(String::as_str),
+        Some("workflows"),
+        "expected `pub use workflows::diagnostics::ai_network;` to map `ai_network` -> `workflows`"
+    );
+    assert_eq!(
+        reexports.get("ServiceManager").map(String::as_str),
+        Some("workflows"),
+        "expected `ServiceManager` to map to `workflows`"
+    );
+
+    let excluded_paths = collect_cfg_test_module_paths(&core_src);
+    let mut files = Vec::new();
+    collect_rs_files(&core_src, &mut files);
+    files.sort();
+
+    let mut upward_violations = Vec::new();
+    let mut checked_files = 0usize;
+
+    for file in files {
+        if is_test_only_file(&file, &core_src, &excluded_paths) {
+            continue;
+        }
+        let Ok(rel) = file.strip_prefix(&core_src) else {
+            continue;
+        };
+        let Some(owner_layer) = top_level_owner(rel) else {
+            continue;
+        };
+        if core_layer_rank(&owner_layer).is_none() {
+            continue;
+        }
+
+        checked_files += 1;
+        let source = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        let production_tokens = strip_cfg_test_tokens(&tokenize_code(&source));
+        let depth_from_crate = module_depth_from_root(rel);
+        let rel_display = file.strip_prefix(&root).unwrap_or(&file).display();
+
+        for violation in find_upward_layer_violations(
+            &production_tokens,
+            &owner_layer,
+            depth_from_crate,
+            &reexports,
+        ) {
+            upward_violations.push(format!("{rel_display}: {violation}"));
+        }
+    }
+
+    assert!(
+        checked_files > 0,
+        "expected production files across the 5 layers under {}",
+        core_src.display()
+    );
+    assert!(
+        upward_violations.is_empty(),
+        "upward layer dependencies detected in `zenclash-core` (strict DAG: platform[0] < mihomo[1] < storage[2] < runtime[3] < workflows[4]):\n{}",
+        upward_violations.join("\n")
+    );
+
+    let mut intra_layer_cycles = Vec::new();
+    for layer in ZENCLASH_CORE_STRICTLY_ACYCLIC_LAYERS {
+        let graph = build_layer_submodule_dependency_graph(&core_src, layer, &excluded_paths);
+        assert!(
+            !graph.modules.is_empty(),
+            "expected submodules inside `zenclash-core::{layer}`"
+        );
+        for (source, targets) in &graph.edges {
+            for target in targets {
+                if source < target
+                    && graph
+                        .edges
+                        .get(target)
+                        .is_some_and(|reverse| reverse.contains(source))
+                {
+                    let forward_files = graph
+                        .edge_files
+                        .get(&(source.clone(), target.clone()))
+                        .map(|files| files.iter().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    let reverse_files = graph
+                        .edge_files
+                        .get(&(target.clone(), source.clone()))
+                        .map(|files| files.iter().cloned().collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default();
+                    intra_layer_cycles.push(format!(
+                        "zenclash-core::{layer}: {source} <-> {target}\n  {source} -> {target}: [{forward_files}]\n  {target} -> {source}: [{reverse_files}]"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        intra_layer_cycles.is_empty(),
+        "direct bidirectional submodule cycles detected inside strictly acyclic `zenclash-core` layers:\n{}",
+        intra_layer_cycles.join("\n")
     );
 }
 
@@ -1134,4 +1362,646 @@ fn cfg_test_stripping_handles_modules_functions_and_struct_fields() {
     ));
     assert!(tokens.contains(&Token::Ident("live_field".into())));
     assert!(!tokens.contains(&Token::Ident("debug_calls".into())));
+}
+
+fn core_layer_rank(layer: &str) -> Option<usize> {
+    ZENCLASH_CORE_LAYERS
+        .iter()
+        .position(|&candidate| candidate == layer)
+}
+
+fn module_depth_from_root(rel: &Path) -> usize {
+    let count = rel.components().count();
+    if rel.file_name() == Some(OsStr::new("mod.rs")) {
+        count.saturating_sub(1)
+    } else {
+        count
+    }
+}
+
+/// Parses top-level `pub use <layer>::...;` declarations in `crates/zenclash-core/src/lib.rs`
+/// and maps every crate-root re-exported symbol or module alias to its owning layer.
+fn parse_crate_root_reexports(tokens: &[Token]) -> BTreeMap<String, String> {
+    let mut reexports = BTreeMap::new();
+    let mut index = 0;
+    let mut brace_depth = 0usize;
+
+    while index < tokens.len() {
+        match &tokens[index] {
+            Token::Punct('{') => {
+                brace_depth += 1;
+                index += 1;
+            }
+            Token::Punct('}') => {
+                brace_depth = brace_depth.saturating_sub(1);
+                index += 1;
+            }
+            Token::Ident(kw) if brace_depth == 0 && kw == "pub" => {
+                let after_vis = skip_visibility(tokens, index);
+                if matches!(tokens.get(after_vis), Some(Token::Ident(use_kw)) if use_kw == "use") {
+                    let next = parse_use_tree_reexports(tokens, after_vis + 1, &[], &mut reexports);
+                    index = if matches!(tokens.get(next), Some(Token::Punct(';'))) {
+                        next + 1
+                    } else {
+                        next.max(index + 1)
+                    };
+                } else {
+                    index += 1;
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    reexports
+}
+
+fn parse_use_tree_reexports(
+    tokens: &[Token],
+    mut cursor: usize,
+    prefix: &[String],
+    out: &mut BTreeMap<String, String>,
+) -> usize {
+    if matches!(
+        tokens.get(cursor..cursor + 2),
+        Some([Token::Punct(':'), Token::Punct(':')])
+    ) {
+        cursor += 2;
+    }
+
+    let mut path = prefix.to_vec();
+    loop {
+        match tokens.get(cursor) {
+            Some(Token::Punct('{')) => {
+                cursor += 1;
+                while cursor < tokens.len() {
+                    if matches!(tokens.get(cursor), Some(Token::Punct('}'))) {
+                        return cursor + 1;
+                    }
+                    if matches!(tokens.get(cursor), Some(Token::Punct(','))) {
+                        cursor += 1;
+                        continue;
+                    }
+                    let next = parse_use_tree_reexports(tokens, cursor, &path, out);
+                    if next <= cursor {
+                        cursor += 1;
+                    } else {
+                        cursor = next;
+                    }
+                }
+                return cursor;
+            }
+            Some(Token::Punct('*')) => {
+                return cursor + 1;
+            }
+            Some(Token::Ident(segment)) => {
+                path.push(segment.clone());
+                cursor += 1;
+                if matches!(
+                    tokens.get(cursor..cursor + 2),
+                    Some([Token::Punct(':'), Token::Punct(':')])
+                ) {
+                    cursor += 2;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let alias = if matches!(tokens.get(cursor), Some(Token::Ident(as_kw)) if as_kw == "as")
+        && let Some(Token::Ident(alias_name)) = tokens.get(cursor + 1)
+    {
+        cursor += 2;
+        Some(alias_name.as_str())
+    } else {
+        None
+    };
+
+    let mut slice: &[String] = &path;
+    while slice.len() > 1 && matches!(slice[0].as_str(), "crate" | "self") {
+        slice = &slice[1..];
+    }
+    if slice.len() > 1 && slice.last().is_some_and(|seg| seg == "self") {
+        slice = &slice[..slice.len() - 1];
+    }
+
+    if let Some(layer) = slice.first()
+        && core_layer_rank(layer).is_some()
+        && let Some(exported) = alias.or_else(|| slice.last().map(String::as_str))
+        && exported != "_"
+        && (slice.len() >= 2 || alias.is_some())
+    {
+        out.insert(exported.to_owned(), layer.clone());
+    }
+
+    cursor
+}
+
+/// Extracts every crate-root identifier referenced via `crate::<Ident>` or `use crate::{...}`.
+fn extract_crate_root_refs(tokens: &[Token]) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        if matches!(
+            tokens.get(index..index + 3),
+            Some([
+                Token::Ident(crate_kw),
+                Token::Punct(':'),
+                Token::Punct(':')
+            ]) if crate_kw == "crate"
+        ) {
+            let cursor = index + 3;
+            match tokens.get(cursor) {
+                Some(Token::Punct('{')) => {
+                    index = parse_use_group_idents(tokens, cursor + 1, None, &mut refs);
+                    continue;
+                }
+                Some(Token::Ident(ident)) => {
+                    refs.insert(ident.clone());
+                    index = cursor + 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+
+    refs
+}
+
+/// Extracts identifiers reached by crossing exactly `expected_depth` `super::` prefixes.
+fn extract_super_prefix_refs(tokens: &[Token], expected_depth: usize) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    if expected_depth == 0 {
+        return refs;
+    }
+
+    let mut index = 0;
+    while index < tokens.len() {
+        let preceded_by_colon = index > 0 && matches!(tokens[index - 1], Token::Punct(':'));
+        if !preceded_by_colon
+            && matches!(
+                tokens.get(index..index + 3),
+                Some([
+                    Token::Ident(super_kw),
+                    Token::Punct(':'),
+                    Token::Punct(':')
+                ]) if super_kw == "super"
+            )
+        {
+            let mut count = 0usize;
+            let mut cursor = index;
+            while matches!(
+                tokens.get(cursor..cursor + 3),
+                Some([
+                    Token::Ident(super_kw),
+                    Token::Punct(':'),
+                    Token::Punct(':')
+                ]) if super_kw == "super"
+            ) {
+                count += 1;
+                cursor += 3;
+            }
+            if count == expected_depth {
+                match tokens.get(cursor) {
+                    Some(Token::Punct('{')) => {
+                        index = parse_use_group_idents(tokens, cursor + 1, None, &mut refs);
+                        continue;
+                    }
+                    Some(Token::Ident(ident)) => {
+                        refs.insert(ident.clone());
+                        index = cursor + 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            index = cursor;
+            continue;
+        }
+        index += 1;
+    }
+
+    refs
+}
+
+fn parse_use_group_idents(
+    tokens: &[Token],
+    mut cursor: usize,
+    allowed: Option<&BTreeSet<String>>,
+    refs: &mut BTreeSet<String>,
+) -> usize {
+    let mut depth = 1usize;
+    let mut expect_segment_head = true;
+
+    while cursor < tokens.len() && depth > 0 {
+        match &tokens[cursor] {
+            Token::Punct('{') => {
+                depth += 1;
+                expect_segment_head = false;
+            }
+            Token::Punct('}') => {
+                depth -= 1;
+            }
+            Token::Punct(',') if depth == 1 => {
+                expect_segment_head = true;
+            }
+            Token::Ident(name) if depth == 1 && expect_segment_head => {
+                if allowed.is_none_or(|set| set.contains(name)) {
+                    refs.insert(name.clone());
+                }
+                expect_segment_head = false;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    cursor
+}
+
+fn find_upward_layer_violations(
+    production_tokens: &[Token],
+    owner_layer: &str,
+    depth_from_crate: usize,
+    reexports: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let Some(owner_rank) = core_layer_rank(owner_layer) else {
+        return Vec::new();
+    };
+
+    let mut root_refs = extract_crate_root_refs(production_tokens);
+    root_refs.extend(extract_super_prefix_refs(
+        production_tokens,
+        depth_from_crate,
+    ));
+
+    let mut violations = Vec::new();
+    for ident in root_refs {
+        if let Some(target_rank) = core_layer_rank(&ident) {
+            if target_rank > owner_rank {
+                violations.push(format!(
+                    "`{owner_layer}` (L{owner_rank}) references explicit `crate::{ident}` (`{ident}`, L{target_rank})"
+                ));
+            }
+        } else if let Some(target_layer) = reexports.get(&ident)
+            && let Some(target_rank) = core_layer_rank(target_layer)
+            && target_rank > owner_rank
+        {
+            violations.push(format!(
+                "`{owner_layer}` (L{owner_rank}) references crate-root re-export `crate::{ident}` from `{target_layer}` (L{target_rank})"
+            ));
+        }
+    }
+
+    violations
+}
+
+fn build_layer_submodule_dependency_graph(
+    core_src: &Path,
+    layer: &str,
+    excluded_paths: &BTreeSet<PathBuf>,
+) -> ModuleGraph {
+    let layer_dir = core_src.join(layer);
+    let modules = discover_top_level_modules(&layer_dir, excluded_paths);
+    let mut edges: BTreeMap<String, BTreeSet<String>> = modules
+        .iter()
+        .map(|name| (name.clone(), BTreeSet::new()))
+        .collect();
+    let mut edge_files: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+
+    let mut files = Vec::new();
+    collect_rs_files(&layer_dir, &mut files);
+    files.sort();
+
+    for file in files {
+        if is_test_only_file(&file, core_src, excluded_paths) {
+            continue;
+        }
+        let Ok(rel) = file.strip_prefix(&layer_dir) else {
+            continue;
+        };
+        let Some(owner) = top_level_owner(rel) else {
+            continue;
+        };
+        if !modules.contains(&owner) {
+            continue;
+        }
+
+        let source = fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        let production_tokens = strip_cfg_test_tokens(&tokenize_code(&source));
+        let depth_in_layer = module_depth_from_root(rel);
+        let refs =
+            extract_layer_submodule_refs(&production_tokens, layer, &modules, depth_in_layer);
+        let rel_display = rel.display().to_string();
+
+        for target in refs {
+            if target == owner {
+                continue;
+            }
+            edges
+                .entry(owner.clone())
+                .or_default()
+                .insert(target.clone());
+            edge_files
+                .entry((owner.clone(), target))
+                .or_default()
+                .insert(rel_display.clone());
+        }
+    }
+
+    ModuleGraph {
+        modules,
+        edges,
+        edge_files,
+    }
+}
+
+fn extract_layer_submodule_refs(
+    tokens: &[Token],
+    layer: &str,
+    submodules: &BTreeSet<String>,
+    depth_in_layer: usize,
+) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        // Pattern 1: `crate::<layer>::<submod>` or `crate::<layer>::{<submod>, ...}`
+        if matches!(
+            tokens.get(index..index + 6),
+            Some([
+                Token::Ident(crate_kw),
+                Token::Punct(':'),
+                Token::Punct(':'),
+                Token::Ident(layer_kw),
+                Token::Punct(':'),
+                Token::Punct(':')
+            ]) if crate_kw == "crate" && layer_kw == layer
+        ) {
+            let cursor = index + 6;
+            match tokens.get(cursor) {
+                Some(Token::Punct('{')) => {
+                    index = parse_use_group_idents(tokens, cursor + 1, Some(submodules), &mut refs);
+                    continue;
+                }
+                Some(Token::Ident(submod)) => {
+                    if submodules.contains(submod) {
+                        refs.insert(submod.clone());
+                    }
+                    index = cursor + 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        // Pattern 2: `use crate::{ ..., <layer>::<submod>::..., <layer>::{<submod>, ...}, ... }`
+        if matches!(
+            tokens.get(index..index + 4),
+            Some([
+                Token::Ident(crate_kw),
+                Token::Punct(':'),
+                Token::Punct(':'),
+                Token::Punct('{')
+            ]) if crate_kw == "crate"
+        ) {
+            index =
+                parse_crate_group_layer_submodules(tokens, index + 4, layer, submodules, &mut refs);
+            continue;
+        }
+
+        index += 1;
+    }
+
+    for super_ref in extract_super_prefix_refs(tokens, depth_in_layer) {
+        if submodules.contains(&super_ref) {
+            refs.insert(super_ref);
+        }
+    }
+
+    refs
+}
+
+fn parse_crate_group_layer_submodules(
+    tokens: &[Token],
+    mut cursor: usize,
+    layer: &str,
+    submodules: &BTreeSet<String>,
+    refs: &mut BTreeSet<String>,
+) -> usize {
+    let mut depth = 1usize;
+    let mut expect_segment_head = true;
+
+    while cursor < tokens.len() && depth > 0 {
+        match &tokens[cursor] {
+            Token::Punct('{') => {
+                depth += 1;
+                expect_segment_head = false;
+                cursor += 1;
+            }
+            Token::Punct('}') => {
+                depth -= 1;
+                cursor += 1;
+            }
+            Token::Punct(',') if depth == 1 => {
+                expect_segment_head = true;
+                cursor += 1;
+            }
+            Token::Ident(name) if depth == 1 && expect_segment_head => {
+                expect_segment_head = false;
+                if name == layer
+                    && matches!(
+                        tokens.get(cursor + 1..cursor + 3),
+                        Some([Token::Punct(':'), Token::Punct(':')])
+                    )
+                {
+                    match tokens.get(cursor + 3) {
+                        Some(Token::Ident(submod)) => {
+                            if submodules.contains(submod) {
+                                refs.insert(submod.clone());
+                            }
+                            cursor += 4;
+                            continue;
+                        }
+                        Some(Token::Punct('{')) => {
+                            cursor =
+                                parse_use_group_idents(tokens, cursor + 4, Some(submodules), refs);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                cursor += 1;
+            }
+            _ => {
+                cursor += 1;
+            }
+        }
+    }
+
+    cursor
+}
+
+#[test]
+fn lib_reexport_parser_maps_grouped_symbols_and_module_aliases_to_layers() {
+    let sample = r#"
+        pub mod platform;
+        pub mod mihomo;
+        pub mod storage;
+        pub mod runtime;
+        pub mod workflows;
+
+        pub use runtime::service::ipc as service;
+        pub use workflows::diagnostics::ai_network;
+        pub use crate::platform::AppDataPaths;
+        pub use mihomo::{
+            MihomoError,
+            proxy::ProxyCatalog as Catalog,
+            tun::{self, TunConfig},
+        };
+        pub use storage::{ProfileStore, YamlOverrideStore};
+        pub use workflows::{BackupManager, ServiceManager};
+        pub use workflows::HiddenTrait as _;
+        pub use std::path::PathBuf;
+
+        #[cfg(test)]
+        pub use workflows::TestOnlySymbol;
+    "#;
+
+    let tokens = strip_cfg_test_tokens(&tokenize_code(sample));
+    let map = parse_crate_root_reexports(&tokens);
+
+    assert_eq!(map.get("service").map(String::as_str), Some("runtime"));
+    assert_eq!(map.get("ai_network").map(String::as_str), Some("workflows"));
+    assert_eq!(
+        map.get("AppDataPaths").map(String::as_str),
+        Some("platform")
+    );
+    assert_eq!(map.get("MihomoError").map(String::as_str), Some("mihomo"));
+    assert_eq!(map.get("Catalog").map(String::as_str), Some("mihomo"));
+    assert_eq!(map.get("tun").map(String::as_str), Some("mihomo"));
+    assert_eq!(map.get("TunConfig").map(String::as_str), Some("mihomo"));
+    assert_eq!(map.get("ProfileStore").map(String::as_str), Some("storage"));
+    assert_eq!(
+        map.get("ServiceManager").map(String::as_str),
+        Some("workflows")
+    );
+    assert!(!map.contains_key("_"));
+    assert!(!map.contains_key("PathBuf"));
+    assert!(!map.contains_key("TestOnlySymbol"));
+}
+
+#[test]
+fn five_layer_dag_detector_catches_explicit_and_reexport_upward_refs_and_ignores_cfg_test() {
+    let reexports: BTreeMap<String, String> = [
+        ("AppDataPaths", "platform"),
+        ("MihomoError", "mihomo"),
+        ("ProfileStore", "storage"),
+        ("CoreSession", "runtime"),
+        ("service", "runtime"),
+        ("ServiceManager", "workflows"),
+        ("ai_network", "workflows"),
+    ]
+    .into_iter()
+    .map(|(sym, layer)| (sym.to_owned(), layer.to_owned()))
+    .collect();
+
+    let clean_storage_source = r#"
+        use crate::platform::paths::AppDataPaths;
+        use crate::{MihomoError, ProfileStore};
+        use crate::storage::overrides::YamlOverrideStore;
+
+        fn ok() {
+            let _ = crate::AppDataPaths::default();
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use crate::workflows::backup::BackupManager;
+            use crate::ServiceManager;
+            use crate::service::Client;
+        }
+    "#;
+    let clean_tokens = strip_cfg_test_tokens(&tokenize_code(clean_storage_source));
+    assert!(
+        find_upward_layer_violations(&clean_tokens, "storage", 2, &reexports).is_empty(),
+        "downward, same-layer, and #[cfg(test)] references must be allowed"
+    );
+
+    let violating_storage_source = r#"
+        use crate::workflows::backup::BackupManager;
+        use crate::{MihomoError, ServiceManager, runtime::CoreSession};
+
+        fn bad() {
+            let _ = crate::service::Client;
+            let _ = crate::ai_network::probe;
+            let _ = super::super::CoreSession;
+        }
+
+        #[cfg(test)]
+        fn ignored_in_tests() {
+            use crate::workflows::telemetry::LogMonitor;
+        }
+    "#;
+    let violating_tokens = strip_cfg_test_tokens(&tokenize_code(violating_storage_source));
+    let violations = find_upward_layer_violations(&violating_tokens, "storage", 2, &reexports);
+    assert_eq!(violations.len(), 6, "violations: {violations:?}");
+    assert!(violations.iter().any(|v| v.contains("crate::workflows")));
+    assert!(violations.iter().any(|v| v.contains("crate::runtime")));
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("crate::ServiceManager"))
+    );
+    assert!(violations.iter().any(|v| v.contains("crate::service")));
+    assert!(violations.iter().any(|v| v.contains("crate::ai_network")));
+    assert!(violations.iter().any(|v| v.contains("crate::CoreSession")));
+}
+
+#[test]
+fn layer_submodule_ref_extractor_handles_crate_and_super_paths() {
+    let sample = r#"
+        use crate::workflows::backup::BackupManager;
+        use crate::workflows::{capture::CapturePlan, telemetry};
+        use crate::{
+            platform::CoreKind,
+            workflows::{operations::ProxyOperations, service_manager},
+        };
+        use super::profile_apply::ProfileApplication;
+        use super::super::storage::ProfileStore;
+    "#;
+    let submods: BTreeSet<String> = [
+        "backup",
+        "capture",
+        "telemetry",
+        "operations",
+        "service_manager",
+        "profile_apply",
+        "storage",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+
+    let refs = extract_layer_submodule_refs(&tokenize_code(sample), "workflows", &submods, 1);
+    let expected: BTreeSet<String> = [
+        "backup",
+        "capture",
+        "telemetry",
+        "operations",
+        "service_manager",
+        "profile_apply",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(refs, expected);
 }

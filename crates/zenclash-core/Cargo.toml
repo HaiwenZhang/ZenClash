@@ -70,11 +70,14 @@ path = "tests/support/mock_core.rs"
 required-features = ["service-ipc-tests"]
 
 [[test]]
-name = "native_service_session"
-path = "tests/native_service_session.rs"
+name = "core_integration"
+path = "tests/core_integration/main.rs"
+
+[[test]]
+name = "service_ipc"
+path = "tests/service_ipc/main.rs"
 required-features = ["service-ipc-tests"]
 
 [[test]]
-name = "native_service_client"
-path = "tests/native_service_client.rs"
-required-features = ["service-ipc-tests"]
+name = "real_core"
+path = "tests/real_core/main.rs"

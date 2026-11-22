@@ -1,5 +1,4 @@
 // ZenClash integration regression, 2026-10-04. GPL-3.0-only; see NOTICE.md.
-#![cfg(feature = "service-ipc-tests")]
 
 use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
@@ -7,6 +6,7 @@ use zenclash_core::service::{RuntimeBundle, ServiceSession, StageRuntimeOutcome}
 
 #[tokio::test]
 async fn native_session_takeover_staging_and_stop_preserve_owner_proof() -> Result<()> {
+    let _serial = crate::ipc_test_lock().await;
     let root =
         std::env::temp_dir().join(format!("zenclash-integration-ipc-{}", std::process::id()));
     std::fs::create_dir_all(&root)?;

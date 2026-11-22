@@ -1,5 +1,4 @@
 // ZenClash application IPC integration, 2026-10-05. GPL-3.0-only; see NOTICE.md.
-#![cfg(feature = "service-ipc-tests")]
 
 use std::{
     io::{Read as _, Write as _},
@@ -33,6 +32,7 @@ async fn pac_status(server: &PacServer) -> Result<String> {
 #[tokio::test]
 async fn application_start_reload_displacement_and_shutdown_use_the_actual_native_owner()
 -> Result<()> {
+    let _serial = crate::ipc_test_lock().await;
     let root = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
         "zenclash-application-native-{}-{}",
         std::process::id(),

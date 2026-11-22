@@ -1,5 +1,4 @@
 //! Exercises GUI lifetime against the isolated native service and simulated core.
-#![cfg(feature = "service-ipc-tests")]
 
 use anyhow::{Context as _, Result, ensure};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,6 +6,7 @@ use zenclash_core::service::{RuntimeBundle, ServiceSession};
 
 #[tokio::test]
 async fn background_renewals_keep_the_core_alive_until_the_gui_session_is_dropped() -> Result<()> {
+    let _serial = crate::ipc_test_lock().await;
     let root = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
         "zenclash-native-lifetime-{}-{}",
         std::process::id(),

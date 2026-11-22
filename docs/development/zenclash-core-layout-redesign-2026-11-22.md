@@ -54,82 +54,85 @@ crates/zenclash-core/
 src/
 ├── lib.rs
 │
-├── platform/                              # Layer 0（仅依赖 std & 外部基础 crate）
-│   ├── paths/                             # 原 application_paths/（AppDataPaths / BundledResources / WorkspaceResources）
-│   ├── command/                           # 原 platform_command/（有界非阻塞子进程执行）
-│   ├── autostart/                         # 原 autostart/{macos,linux,windows,unsupported}.rs
-│   ├── instance_lock.rs                   # 单实例进程锁
-│   └── fs_io.rs                           # 抽离通用 atomic_write / sync_all / FIFO 防护 / 私有文件权限（原散落在 profiles/storage & logs/private_io）
+├── platform.rs + platform/                # Layer 0（仅依赖 std & 外部基础 crate）
+│   ├── paths.rs + paths/                  # 原 application_paths/（AppDataPaths / BundledResources / WorkspaceResources）
+│   ├── command.rs + command/              # 原 platform_command/（有界非阻塞子进程执行）
+│   ├── autostart.rs + autostart/          # 原 autostart/{macos,linux,windows,unsupported}.rs
+│   ├── instance_lock.rs                   # 单实例进程锁（AppInstanceLock）
+│   ├── data_coordinator.rs                # 原 data_coordinator.rs（DataWriteLease / DataWriteAccess）
+│   ├── observation.rs                     # 原 observation_types.rs（Observation / CapabilityState / FirstRunStage / OperationalFailure）
+│   ├── core_kind.rs                       # 原 core_backend.rs（CoreKind / CoreCapabilities）
+│   ├── fs_io.rs + fs_io/                  # 通用 atomic_write / 有界 regular-file 读取 / 私有文件权限（+ windows_private.rs）
+│   └── privilege.rs                       # 进程提权状态查询（current_process_elevated）
 │
-├── mihomo/                                # Layer 1（仅依赖 platform）
-│   ├── errors.rs                          # 原 core_errors.rs（MihomoError / VersionInfo / PacError / SystemProxyError）
+├── mihomo.rs + mihomo/                    # Layer 1（仅依赖 platform）
+│   ├── errors.rs                          # 原 core_errors.rs（MihomoError / VersionInfo / PacError / SystemProxyError 等）
 │   ├── endpoint.rs                        # MihomoEndpoint
-│   ├── models/                            # 原 models/（Connection / RuntimeConfig / Rule / Provider / Memory / DNS）
-│   ├── proxy.rs                           # 原 proxy.rs（ProxyCatalog / ProxyGroup / ProxyNode / DelayHistory）
+│   ├── models.rs + models/                # 原 models/（Connection / RuntimeConfig / Rule / Provider / Memory / DNS）
+│   ├── proxy.rs + proxy/                  # 原 proxy.rs（ProxyCatalog / ProxyGroup / ProxyNode / DelayHistory）
 │   ├── http_body.rs                       # 唯一有界 HTTP 响应体读取器
 │   ├── websocket.rs                       # 有界 WebSocket 传输配置与重连退避
-│   ├── config/                            # 合并原 profile.rs + config_pipeline.rs + config_diff.rs + core_validation.rs + listener_fallback.rs
+│   ├── config.rs + config/                # 合并原 profile.rs + config_pipeline.rs + config_diff.rs + core_validation.rs + listener_fallback.rs
 │   │   ├── merge.rs                       # 原 profile.rs（YAML 合并与 << 展开）
 │   │   ├── pipeline.rs                    # 原 config_pipeline.rs（EffectiveConfigPipeline / OverrideKeys / HOT/FULL 键集）
 │   │   ├── diff.rs                        # 原 config_diff.rs
 │   │   ├── validation.rs                  # 原 core_validation.rs
 │   │   └── listener_fallback.rs           # 原 listener_fallback.rs
-│   ├── tun/                               # 合并原 4 个零散顶层 tun_*.rs
+│   ├── tun.rs + tun/                      # 合并原 4 个零散顶层 tun_*.rs
 │   │   ├── config.rs                      # 原 tun_config.rs
 │   │   ├── admission.rs                   # 原 tun_admission.rs
 │   │   ├── permissions.rs                 # 原 tun_permissions.rs
-│   │   └── runtime/                       # 原 tun_runtime/{macos,linux,windows}.rs
+│   │   └── runtime.rs + runtime/          # 原 tun_runtime/{macos,linux,windows}.rs
 │   ├── system_proxy_types.rs              # 原 system_proxy_types.rs（纯值类型与校验规则，供 storage/preferences 与 workflows/capture 共用）
-│   ├── ruleset.rs                         # 规则集格式转换
-│   └── client/                            # 原 client/（api / connections / request / transport）
+│   ├── network_types.rs                   # 网络探测值类型（NetworkLatencyTarget / PublicIpProvider / NetworkProbeError 等）
+│   └── ruleset.rs                         # 规则集格式转换
 │
-├── storage/                               # Layer 2（仅依赖 platform, mihomo）
-│   ├── coordinator.rs                     # 原 data_coordinator.rs（DataWriteLease / DataWriteAccess）
-│   ├── preferences/                       # 原 preferences/
-│   ├── profiles/                          # 原 profiles/（CRUD / 索引 / 下载 / 调度 / 事务应用）
-│   ├── overrides/                         # 原 yaml_overrides/
-│   ├── controlled/                        # 原 controlled_config/
-│   ├── traffic_history/                   # 原 traffic_history/（SQLite 长连接 + 查询 + 模型）
-│   └── backup/                            # 原 backup/（ZIP 导出/导入 + WAL 事务恢复）
+├── storage.rs + storage/                  # Layer 2（仅依赖 platform, mihomo）
+│   ├── preferences.rs + preferences/      # 原 preferences/（AppPreferencesStore / 迁移 / 观测）
+│   ├── profiles.rs + profiles/            # 原 profiles/ 纯持久化仓库（CRUD / 索引 / 下载 / 调度 / 校验）
+│   ├── overrides.rs + overrides/          # 原 yaml_overrides/（YamlOverrideStore）
+│   └── traffic_history.rs + traffic_history/ # 原 traffic_history/（SQLite 长连接 + 查询 + 模型）
 │
-├── runtime/                               # Layer 3（仅依赖 platform, mihomo, storage）
-│   ├── errors.rs                          # 原 session_errors.rs（CoreSessionError / TrafficCaptureError）
-│   ├── backend.rs                         # 原 core_backend.rs（CoreKind / CoreCapabilities）
-│   ├── launcher.rs                        # 原 runtime_launcher.rs（CoreProcessLauncher / CoreProcessLease / KernelOwner / LeftoverLease / IntentReconciler）
-│   ├── owner.rs                           # 原 owned_core.rs（OwnedCore 桥接）
-│   ├── local/                             # 本地托管内核全生命周期
-│   │   ├── process/                       # 原 managed_core_process/
+├── runtime.rs + runtime/                  # Layer 3（仅依赖 platform, mihomo, storage）
+│   ├── errors.rs                          # 原 session_errors.rs（CoreSessionError / TrafficCaptureError / TrafficCaptureTask）
+│   ├── launcher.rs + launcher/            # 原 runtime_launcher.rs（CoreProcessLauncher / CoreProcessLease / KernelOwner / LeftoverLease / IntentReconciler）
+│   ├── owner.rs                           # 原 owned_core.rs（OwnedCore 桥接与 CoreTunPermissionStatus）
+│   ├── local.rs + local/                  # 本地托管内核全生命周期
+│   │   ├── process.rs + process/          # 原 managed_core_process/
 │   │   ├── installation.rs                # 原 core_installation.rs
-│   │   └── update/                        # 原 core_update/
-│   ├── service/                           # 提权服务会话与资源适配（收拢原 service/ + service_runtime/ + service_runtime_session/）
-│   │   ├── ipc/                           # 原 service/{session,controller,health,maintenance,owner_identity,platform,runstate,runtime_bundle,running_mode,sidecar}.rs
-│   │   ├── bundle/                        # 原 service_runtime/
-│   │   └── session/                       # 原 service_runtime_session/
-│   └── session/                           # 原 core_session/（唯一 CoreSession 状态机与事务准入）
+│   │   └── update.rs + update/            # 原 core_update/
+│   ├── service.rs + service/              # 提权服务会话与资源适配（收拢原 service/ + service_runtime/ + service_runtime_session/）
+│   │   ├── ipc.rs + ipc/                  # 原 service/{session,controller,execution,health,maintenance,owner_identity,platform,probe,runstate,runtime_bundle,running_mode}.rs
+│   │   ├── bundle.rs + bundle/            # 原 service_runtime/
+│   │   └── session.rs + session/          # 原 service_runtime_session/
+│   ├── client.rs + client/                # 原 client/（api / connections / request / transport）
+│   ├── controlled.rs + controlled/        # 原 controlled_config/（ControlledConfigStore 与热更新/重载应用）
+│   └── session.rs + session/              # 原 core_session/（唯一 CoreSession 状态机与事务准入）
 │
-├── workflows/                             # Layer 4（仅依赖 platform, mihomo, storage, runtime）
-│   ├── capture/                           # 合并系统代理与流量捕获编排
-│   │   ├── session.rs                     # 原 traffic_capture.rs（+ backend.rs / core_recovery.rs / error.rs）
-│   │   └── system_proxy/                  # 原 system_proxy/{configuration,native,pac,summary,macos,linux,windows,unsupported}.rs
-│   ├── service_manager/                   # 原 service_manager/
-│   ├── operations/                        # 代理与 Provider 业务操作
-│   │   ├── proxy/                         # 原 proxy_operations/
-│   │   └── provider/                      # 原 provider_operations/
-│   ├── telemetry/                         # 运行态观测与实时流
-│   │   ├── observation.rs                 # 原 observation_types.rs
-│   │   ├── traffic/                       # 原 traffic/
-│   │   ├── logs/                          # 原 logs/
-│   │   └── status/                        # 原 operational_status/
-│   └── diagnostics/                       # 网络探测、诊断、AI 网络与版本更新
-│       ├── network/                       # 原 network/
-│       ├── runner/                        # 原 network_diagnostics/
-│       ├── ai_network/                    # 原 ai_network/
+├── workflows.rs + workflows/              # Layer 4（仅依赖 platform, mihomo, storage, runtime）
+│   ├── backup.rs + backup/                # 原 backup/（ZIP 导出/导入 + WAL 事务恢复）
+│   ├── profile_apply.rs + profile_apply/  # Profile 切换、准备、暂存与服务提交编排
+│   ├── capture.rs + capture/              # 合并系统代理与流量捕获编排
+│   │   ├── session.rs + session/          # 原 traffic_capture.rs（+ backend.rs / core_recovery.rs / error.rs）
+│   │   └── system_proxy.rs + system_proxy/ # 原 system_proxy/{configuration,error,native,pac,summary,macos,linux,windows,unsupported}.rs
+│   ├── service_manager.rs + service_manager/ # 原 service_manager/（health / maintenance / startup / tun / backup）
+│   ├── operations.rs + operations/        # 代理与 Provider 业务操作
+│   │   ├── proxy.rs + proxy/              # 原 proxy_operations/
+│   │   └── provider.rs + provider/        # 原 provider_operations/
+│   ├── telemetry.rs + telemetry/          # 运行态观测与实时流
+│   │   ├── traffic.rs + traffic/          # 原 traffic/
+│   │   ├── logs.rs + logs/                # 原 logs/
+│   │   └── status.rs + status/            # 原 operational_status/
+│   └── diagnostics.rs + diagnostics/      # 网络探测、诊断、AI 网络与版本更新
+│       ├── network.rs + network/          # 原 network/
+│       ├── runner.rs + runner/            # 原 network_diagnostics/
+│       ├── ai_network.rs + ai_network/    # 原 ai_network/
 │       └── app_update.rs                  # 原 app_update.rs
 │
-└── test_support/                          # 统一测试支撑（仅 test / test-support 特性编译）
+└── test_support.rs + test_support/        # 统一测试支撑（仅 test / test-support 特性编译）
     ├── http.rs                            # 原 test_support/http.rs
     ├── stream_publication.rs              # 原 stream_publication_test_support.rs
-    ├── session.rs                         # 原 core_session/test_support/
+    ├── session.rs + session/              # 原 core_session/test_support/（+ owned_child.rs）
     └── tun.rs                             # 原 tun_runtime/test_support.rs
 ```
 
@@ -236,7 +239,7 @@ path = "tests/real_core/main.rs"
 
 ## 五、CI 静态分层守护升级（防结构再次腐化）
 
-升级 `crates/zenclash-app/tests/architecture_guards.rs`，在保留“0 双向环”基础上，新增 **`zenclash_core_enforces_strict_five_layer_dag`** 静态守护测试：
+升级 `crates/zenclash-app/tests/architecture_guards.rs`，在保留原有 5 项架构门禁基础上，新增 3 项纯 `std` 静态 CI 守护测试：
 
 ```mermaid
 flowchart TD
@@ -252,8 +255,12 @@ flowchart TD
     L1 --> L0
 ```
 
-- 校验 `crates/zenclash-core/src/` 顶层仅允许存在 `lib.rs`、`platform`、`mihomo`、`storage`、`runtime`、`workflows`、`test_support`（禁止再往顶层随意平铺新文件）。
-- 校验任意非测试文件只能向下引用更低层（严格单向 DAG，任何 `platform -> mihomo`、`mihomo -> storage`、`storage -> runtime`、`runtime -> workflows` 均直接 CI 报错）。
+1. **`workspace_src_uses_rust_2024_no_mod_rs_style`**：动态扫描全仓 `crates/*/src/`（不扫描 `tests/`，保留 `crates/zenclash-service/tests/common/mod.rs` 等 Cargo 集成测试辅助模块），断言零 `mod.rs` 文件，全仓统一采用 Rust 2024 `<name>.rs` + `<name>/` 风格。
+2. **`zenclash_core_top_level_layout_is_strictly_five_layers`**：校验 `crates/zenclash-core/src/` 顶层仅允许存在 `lib.rs`、`platform(.rs)`、`mihomo(.rs)`、`storage(.rs)`、`runtime(.rs)`、`workflows(.rs)`、`test_support(.rs)`，且五层入口文件与目录全部齐备（禁止再往顶层随意平铺新文件）。
+3. **`zenclash_core_enforces_strict_five_layer_dag`**：
+   - 严格校验 `platform[0] < mihomo[1] < storage[2] < runtime[3] < workflows[4]` 单向向下依赖 DAG，覆盖所有非测试生产 `.rs` 文件（自动剥离 `#[cfg(test)]` 项）；
+   - 同时捕获 **显式层级路径**（如 `crate::workflows::...`）与 **crate 根重导出捷径**（解析 `lib.rs` 的 `pub use <layer>::...;` 生成符号/别名到所属层的映射，拦截如 `storage` 内直接引用 `crate::ServiceManager`、`crate::service`、`crate::ai_network` 等变相上行引用）；
+   - 断言严格无环层（`platform`、`storage`、`workflows`）内部亦不存在任何直接双向子模块环。
 
 ---
 
