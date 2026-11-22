@@ -5,7 +5,6 @@ use crate::runtime::session::service_tun::PreparedConfig;
 use crate::{ControlledConfigStore, CoreRestoreSnapshot, PreparedBackupRestore};
 
 #[cfg(test)]
-#[path = "backup_tests.rs"]
 mod tests;
 
 /// One frozen Local backup application, prepared before any live data is replaced.

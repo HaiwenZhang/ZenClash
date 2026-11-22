@@ -1,8 +1,7 @@
 //! Monotonic ownership lifetime, serialized by the server's lifecycle lock.
 
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
-use std::time::Instant;
+use std::{sync::LazyLock, time::Instant};
 
 struct OwnerLease {
     generation: u64,
@@ -22,7 +21,7 @@ impl OwnerLease {
     }
 }
 
-static LEASE: Lazy<Mutex<Option<OwnerLease>>> = Lazy::new(|| Mutex::new(None));
+static LEASE: LazyLock<Mutex<Option<OwnerLease>>> = LazyLock::new(|| Mutex::new(None));
 
 pub(super) fn reset(generation: Option<u64>) {
     *LEASE.lock() = generation.map(|generation| OwnerLease::new(generation, Instant::now()));

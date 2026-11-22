@@ -1,8 +1,10 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use super::*;
+use crate::mihomo::errors::MihomoError;
 
 struct FakeLease {
     running: AtomicBool,

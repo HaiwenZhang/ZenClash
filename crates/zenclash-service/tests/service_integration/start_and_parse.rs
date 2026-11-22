@@ -1,10 +1,7 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
-#![cfg(all(feature = "standalone", feature = "client", feature = "test"))]
 
-mod common;
-
+use crate::common::{self, start_server, stop_server};
 use anyhow::{Context as _, Result};
-use common::{start_server, stop_server};
 use serial_test::serial;
 #[cfg(unix)]
 use zenclash_service::stop_ipc_server;

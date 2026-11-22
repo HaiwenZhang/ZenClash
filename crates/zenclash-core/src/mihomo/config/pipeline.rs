@@ -54,7 +54,7 @@ pub(crate) fn normalize_runtime_value(
     let root = document
         .as_mapping_mut()
         .ok_or(ControlledConfigError::NotMapping)?;
-    let tun_changed = crate::mihomo::tun::config::normalize(root);
+    let tun_changed = super::tun::normalize(root);
     let geox_changed = insert_missing_mihomo_geox_urls(root);
     Ok(tun_changed || geox_changed)
 }
@@ -246,6 +246,60 @@ pub struct EffectiveConfigRequest {
     pub(crate) session_fallbacks: BTreeMap<String, SessionListenerFallback>,
     /// Whether to probe sockets and resolve occupied listener ports into session fallbacks.
     pub probe_listener_conflicts: bool,
+}
+
+impl EffectiveConfigRequest {
+    /// Creates a new synthesis request for `source_yaml` and `core_kind` with an
+    /// empty controlled override, no external YAML overrides, no session listener
+    /// fallbacks, and listener conflict probing disabled.
+    #[must_use]
+    pub fn new(source_yaml: impl Into<String>, core_kind: CoreKind) -> Self {
+        Self {
+            source_yaml: source_yaml.into(),
+            controlled_override: Value::Mapping(serde_yaml::Mapping::new()),
+            override_keys: None,
+            yaml_overrides: Vec::new(),
+            core_kind,
+            disable_tun_for_runtime: false,
+            session_fallbacks: BTreeMap::new(),
+            probe_listener_conflicts: false,
+        }
+    }
+
+    /// Sets the controlled override mapping applied over the source profile.
+    #[must_use]
+    pub fn with_controlled_override(mut self, controlled_override: Value) -> Self {
+        self.controlled_override = controlled_override;
+        self
+    }
+
+    /// Sets the explicit dotted-path override key set for controlled key clearing.
+    #[must_use]
+    pub fn with_override_keys(mut self, override_keys: OverrideKeys) -> Self {
+        self.override_keys = Some(override_keys);
+        self
+    }
+
+    /// Sets ordered external YAML override files applied after the controlled layer.
+    #[must_use]
+    pub fn with_yaml_overrides(mut self, yaml_overrides: Vec<PathBuf>) -> Self {
+        self.yaml_overrides = yaml_overrides;
+        self
+    }
+
+    /// Configures whether runtime policy forces `tun.enable: false`.
+    #[must_use]
+    pub const fn with_disable_tun_for_runtime(mut self, disable: bool) -> Self {
+        self.disable_tun_for_runtime = disable;
+        self
+    }
+
+    /// Configures whether to probe sockets and remap occupied listener ports.
+    #[must_use]
+    pub const fn with_probe_listener_conflicts(mut self, probe: bool) -> Self {
+        self.probe_listener_conflicts = probe;
+        self
+    }
 }
 
 /// Single-`Value`-stage effective configuration synthesis engine.

@@ -6,12 +6,14 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Write as _},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result};
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tracing::Level;
 
@@ -26,7 +28,7 @@ const ROTATED_LOG_PREFIX: &str = "service_";
 const ROTATED_LOG_SUFFIX: &str = ".log";
 
 static ROTATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_WRITER: Lazy<Mutex<Option<RotatingFileWriter>>> = Lazy::new(|| Mutex::new(None));
+static GLOBAL_WRITER: LazyLock<Mutex<Option<RotatingFileWriter>>> = LazyLock::new(|| Mutex::new(None));
 
 struct RotatingFileWriter {
     directory: PathBuf,
@@ -281,7 +283,7 @@ fn truncate_utf8_in_place(value: &mut String, max_bytes: usize) {
     value.truncate(boundary);
 }
 
-pub static LOG_RING: Lazy<LogRing> = Lazy::new(LogRing::new);
+pub static LOG_RING: LazyLock<LogRing> = LazyLock::new(LogRing::new);
 
 #[cfg(test)]
 mod tests {

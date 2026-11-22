@@ -182,8 +182,8 @@ pub fn windows_service_is_stopping() -> bool {
 }
 
 #[cfg(all(feature = "client", not(feature = "test")))]
-static CLIENT: once_cell::sync::Lazy<tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>> =
-    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(None));
+static CLIENT: std::sync::LazyLock<tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
 
 #[cfg(all(feature = "client", not(feature = "test")))]
 pub(crate) async fn wake_service() -> Result<()> {
@@ -208,7 +208,7 @@ pub(crate) async fn wake_service() -> Result<()> {
                 if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut pid) } == 0 {
                     return Err(io::Error::last_os_error()).context("failed to inspect activation pipe peer");
                 }
-                crate::client::windows_identity::verify_registered_service_process_id(pid)?;
+                super::windows_identity::verify_registered_service_process_id(pid)?;
                 let mut ack = [0];
                 match tokio::time::timeout_at(deadline, client.read_exact(&mut ack)).await {
                     Ok(Ok(_)) if ack == [1] => {

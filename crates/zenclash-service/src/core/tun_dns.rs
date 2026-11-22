@@ -26,7 +26,7 @@
 //! Evidence and acceptance: docs/research/clash-verge-tun-implementation.md, §11.
 
 #[cfg(all(target_os = "macos", not(feature = "test")))]
-use once_cell::sync::Lazy;
+use std::sync::OnceLock;
 #[cfg(any(all(target_os = "macos", not(feature = "test")), test))]
 use std::sync::mpsc;
 
@@ -65,8 +65,7 @@ impl DnsController {
 }
 
 #[cfg(all(target_os = "macos", not(feature = "test")))]
-static CONTROLLER: Lazy<std::io::Result<DnsController>> =
-    Lazy::new(|| DnsController::new(native::DnsLease::default, native::DnsLease::apply));
+static CONTROLLER: OnceLock<std::io::Result<DnsController>> = OnceLock::new();
 
 #[cfg(feature = "test")]
 static SIMULATED_DNS_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -83,6 +82,7 @@ pub(super) async fn apply(enabled: bool) -> anyhow::Result<()> {
     #[cfg(all(target_os = "macos", not(feature = "test")))]
     {
         let controller = CONTROLLER
+            .get_or_init(|| DnsController::new(native::DnsLease::default, native::DnsLease::apply))
             .as_ref()
             .map_err(|error| anyhow::anyhow!("cannot start TUN DNS worker: {error}"))?;
         controller
@@ -140,7 +140,7 @@ pub(super) struct RetirementGuard;
 impl Drop for RetirementGuard {
     fn drop(&mut self) {
         #[cfg(all(target_os = "macos", not(feature = "test")))]
-        if let Some(Ok(controller)) = Lazy::get(&CONTROLLER) {
+        if let Some(Ok(controller)) = CONTROLLER.get() {
             let _ = controller.enqueue(false);
         }
     }

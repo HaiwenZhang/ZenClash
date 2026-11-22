@@ -82,7 +82,7 @@ impl Drop for Connection {
 }
 
 #[cfg(all(feature = "client", not(feature = "test")))]
-static CLIENT: once_cell::sync::Lazy<Mutex<Option<Arc<Connection>>>> = once_cell::sync::Lazy::new(|| Mutex::new(None));
+static CLIENT: std::sync::LazyLock<Mutex<Option<Arc<Connection>>>> = std::sync::LazyLock::new(|| Mutex::new(None));
 
 #[cfg(all(feature = "client", not(feature = "test")))]
 pub(crate) async fn wake_service() -> Result<()> {
@@ -361,7 +361,7 @@ mod tests {
         let output = fixture.root.join("lifecycle.txt");
         let program = std::env::current_exe()?.to_string_lossy().into_owned();
         let mut plist = format!(
-            include_str!("../resources/launchd.plist.tmpl"),
+            include_str!("../../resources/launchd.plist.tmpl"),
             group_name = "staff",
             service_id = name,
             app_bundle_id = "org.zenclash.activation-test",
@@ -369,7 +369,7 @@ mod tests {
         );
         plist = plist.replace(
             &format!("<string>{program}</string>"),
-            &format!("<string>{program}</string><string>--ignored</string><string>--exact</string><string>macos_activation::tests::activation_fixture_process</string><string>--nocapture</string>"),
+            &format!("<string>{program}</string><string>--ignored</string><string>--exact</string><string>activation::macos::tests::activation_fixture_process</string><string>--nocapture</string>"),
         );
         plist = plist.replace("</dict>\n</plist>", &format!(
             "<key>EnvironmentVariables</key><dict><key>ZENCLASH_TEST_ACTIVATION_NAME</key><string>{name}</string><key>ZENCLASH_TEST_ACTIVATION_OUTPUT</key><string>{}</string></dict></dict>\n</plist>", output.display()

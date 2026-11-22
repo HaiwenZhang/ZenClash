@@ -4,6 +4,7 @@ pub(crate) mod diff;
 pub(crate) mod listener_fallback;
 pub(crate) mod merge;
 pub(crate) mod pipeline;
+pub(crate) mod tun;
 pub(crate) mod validation;
 
 pub use diff::{

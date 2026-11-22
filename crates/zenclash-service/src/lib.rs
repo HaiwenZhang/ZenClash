@@ -1,4 +1,6 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
+#[cfg(any(feature = "client", feature = "standalone"))]
+mod activation;
 mod channel;
 mod core;
 #[cfg(feature = "standalone")]
@@ -7,17 +9,9 @@ pub mod daemon;
 pub mod execution;
 #[cfg(feature = "standalone")]
 pub mod install;
-#[cfg(all(
-    target_os = "macos",
-    any(feature = "client", feature = "standalone"),
-    any(not(feature = "test"), test)
-))]
-mod macos_activation;
 pub mod protocol;
 #[cfg(all(windows, any(feature = "client", feature = "standalone")))]
-mod windows_activation;
-#[cfg(all(windows, any(feature = "client", feature = "standalone")))]
-pub use windows_activation::{
+pub use activation::windows::{
     configure_windows_service_activation, windows_service_begin_stopping, windows_service_can_activate,
     windows_service_is_stopping,
 };

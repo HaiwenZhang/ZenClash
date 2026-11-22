@@ -370,7 +370,6 @@ fn service_stream_path(path: &str, query: &[(&str, &str)]) -> Result<String, Str
 }
 
 #[cfg(test)]
-#[path = "service_logs_tests.rs"]
 mod service_logs_tests;
 
 enum StreamBackend {

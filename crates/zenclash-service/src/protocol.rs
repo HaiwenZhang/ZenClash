@@ -6,13 +6,14 @@
 //! `zenclash-core::runtime::service_launcher`.
 
 pub mod messages;
+mod types;
 
-pub use crate::core::structure::{ProtocolInfo, ProtocolVersion, ServiceErrorCode};
 pub use messages::{
     ActiveSessionSummary, LogsResponse, PingRequest, PingResponse, SetTunDnsRequest, SetTunDnsResponse,
     StartProcessRequest, StartProcessResponse, StopProcessRequest, StopProcessResponse, V2Endpoint,
     validate_session_id,
 };
+pub use types::{ProtocolInfo, ProtocolVersion, ServiceErrorCode};
 
 /// Maximum number of recent log lines retained by the bounded stderr/stdout ring buffer.
 pub const MAX_LOG_RING_LINES: usize = 100;

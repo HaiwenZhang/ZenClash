@@ -1,14 +1,14 @@
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use anyhow::Result;
 use kode_bridge::{ClientConfig, IpcHttpClient};
-use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-
-#[cfg(all(windows, any(not(feature = "test"), test)))]
-pub(crate) mod windows_identity;
 
 use crate::{
     AuthenticatedRequest, AuthenticatedSessionRequest, IPC_AUTH_EXPECT, IPC_PATH, IpcCommand,
@@ -18,7 +18,7 @@ use crate::{
     core::structure::{JsonConvert, Response},
 };
 
-static CLIENT_CONFIG: Lazy<Arc<RwLock<Option<IpcConfig>>>> = Lazy::new(|| Arc::new(RwLock::new(None)));
+static CLIENT_CONFIG: LazyLock<Arc<RwLock<Option<IpcConfig>>>> = LazyLock::new(|| Arc::new(RwLock::new(None)));
 
 static IPC_AUTH_HEADER_KEY: &str = "X-IPC-Magic";
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -112,13 +112,13 @@ pub async fn connect() -> Result<IpcHttpClient> {
     debug!("Connecting to IPC at {}", IPC_PATH);
 
     #[cfg(all(windows, not(feature = "test")))]
-    if tokio::task::spawn_blocking(crate::windows_activation::registered_service_can_activate).await?? {
-        crate::windows_activation::wake_service().await?;
+    if tokio::task::spawn_blocking(crate::activation::windows::registered_service_can_activate).await?? {
+        crate::activation::windows::wake_service().await?;
     }
 
     #[cfg(all(target_os = "macos", not(feature = "test")))]
     if !Path::new(IPC_PATH).exists() {
-        crate::macos_activation::wake_service().await?;
+        crate::activation::macos::wake_service().await?;
     }
 
     #[cfg(all(unix, any(not(target_os = "macos"), feature = "test")))]
@@ -139,7 +139,9 @@ pub async fn connect() -> Result<IpcHttpClient> {
             enable_pooling: true,
             require_windows_server_system: false,
             #[cfg(all(windows, not(feature = "test")))]
-            windows_server_pid_verifier: Some(windows_identity::verify_registered_service_process_id),
+            windows_server_pid_verifier: Some(
+                crate::activation::windows_identity::verify_registered_service_process_id,
+            ),
             #[cfg(all(windows, feature = "test"))]
             windows_server_pid_verifier: None,
             ..Default::default()
@@ -157,7 +159,7 @@ pub async fn connect() -> Result<IpcHttpClient> {
         Err(_) => {
             // A stale socket can survive a crash. XPC asks launchd to start its registered
             // helper without administrator prompts; the helper repairs its own socket.
-            crate::macos_activation::wake_service().await?;
+            crate::activation::macos::wake_service().await?;
             client
                 .get(IpcCommand::Magic.as_ref())
                 .header(IPC_AUTH_HEADER_KEY, IPC_AUTH_EXPECT)
@@ -181,7 +183,7 @@ pub async fn connect() -> Result<IpcHttpClient> {
     {
         // Retain one native connection for this GUI process. Its death is observable even
         // when the process crashes, and it protects preparation before a core owner exists.
-        crate::macos_activation::wake_service().await?;
+        crate::activation::macos::wake_service().await?;
     }
     #[cfg(any(not(target_os = "macos"), feature = "test"))]
     let _ = greeting;

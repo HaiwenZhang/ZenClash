@@ -1,5 +1,4 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
-#![cfg(all(feature = "standalone", feature = "client"))]
 
 #[test]
 fn non_unicode_arguments_do_not_panic_before_parsing() -> std::io::Result<()> {

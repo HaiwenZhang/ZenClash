@@ -16,7 +16,6 @@ use crate::{
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const PROFILE: &str = "mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules: []\n";
 
-#[path = "tests/recovery.rs"]
 mod recovery;
 
 #[test]

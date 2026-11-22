@@ -4,10 +4,12 @@ use anyhow::Result;
 use serde_yaml::Value;
 use zenclash_core::{
     mihomo::{
-        ConfigDiffKind, FULL_RELOAD_CONFIG_KEYS, HOT_UPDATE_CONFIG_KEYS, MihomoEndpoint,
-        OverrideKeys, RulesetBehavior, RulesetConversionError, RulesetConverter,
-        apply_controlled_override, diff_yaml_configs, merge_profile_overrides, yaml_content_hash,
+        ConfigDiffKind, EffectiveConfigPipeline, EffectiveConfigRequest, FULL_RELOAD_CONFIG_KEYS,
+        HOT_UPDATE_CONFIG_KEYS, MihomoEndpoint, OverrideKeys, RulesetBehavior,
+        RulesetConversionError, RulesetConverter, apply_controlled_override, diff_yaml_configs,
+        merge_profile_overrides, yaml_content_hash,
     },
+    platform::CoreKind,
     runtime::ControlledConfigStore,
     storage::validate_clash_yaml,
 };
@@ -242,6 +244,79 @@ fn ruleset_converter_and_mihomo_endpoint_validate_inputs() -> Result<()> {
             "expected endpoint `{invalid}` to be rejected"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn effective_config_pipeline_compose_end_to_end_via_public_request_builder() -> Result<()> {
+    let temp = TempDir::new("effective-pipeline-public")?;
+    let override_file = temp.path().join("10-external.yaml");
+    fs::write(&override_file, "log-level: debug\nmode: global\n")?;
+
+    let source_yaml = concat!(
+        "defaults: &tun_defaults\n",
+        "  enable: true\n",
+        "  stack: system\n",
+        "  device: utun99\n",
+        "mixed-port: 7890\n",
+        "mode: rule\n",
+        "tun:\n",
+        "  <<: *tun_defaults\n",
+        "dns:\n",
+        "  enable: true\n",
+        "  fallback-filter:\n",
+        "    geoip: true\n",
+        "    geoip-code: CN\n",
+        "rules:\n",
+        "  - MATCH,DIRECT\n",
+    );
+
+    let controlled: Value = serde_yaml::from_str(concat!(
+        "allow-lan: true\n",
+        "tun:\n",
+        "  device: null\n",
+        "dns:\n",
+        "  fallback-filter:\n",
+        "    geoip: null\n",
+    ))?;
+    let override_keys = OverrideKeys::from_paths(["tun.device", "dns.fallback-filter.geoip"]);
+
+    let request = EffectiveConfigRequest::new(source_yaml, CoreKind::Mihomo)
+        .with_controlled_override(controlled)
+        .with_override_keys(override_keys)
+        .with_yaml_overrides(vec![override_file])
+        .with_disable_tun_for_runtime(true)
+        .with_probe_listener_conflicts(false);
+
+    let artifact = EffectiveConfigPipeline::compose(request)?;
+    assert_eq!(artifact.content_hash, yaml_content_hash(&artifact.yaml));
+    assert!(artifact.fallbacks.is_empty());
+
+    let parsed: Value = serde_yaml::from_str(&artifact.yaml)?;
+    assert_eq!(parsed["allow-lan"].as_bool(), Some(true));
+    assert_eq!(parsed["log-level"].as_str(), Some("debug"));
+    assert_eq!(parsed["mode"].as_str(), Some("global"));
+    assert_eq!(parsed["tun"]["enable"].as_bool(), Some(false));
+    assert_eq!(parsed["tun"]["stack"].as_str(), Some("system"));
+    // Clearing `tun.device` via OverrideKeys removes `utun99` so TUN normalization applies the platform default.
+    assert_ne!(parsed["tun"]["device"].as_str(), Some("utun99"));
+    assert!(parsed["dns"]["fallback-filter"].get("geoip").is_none());
+    assert_eq!(
+        parsed["dns"]["fallback-filter"]["geoip-code"].as_str(),
+        Some("CN")
+    );
+    assert!(parsed["geox-url"]["geoip"].as_str().is_some());
+
+    // Re-running an identical request produces the exact same SHA-256 content hash.
+    let repeated = EffectiveConfigPipeline::compose(
+        EffectiveConfigRequest::new(source_yaml, CoreKind::Mihomo)
+            .with_disable_tun_for_runtime(false),
+    )?;
+    assert_ne!(artifact.content_hash, repeated.content_hash);
+    let repeated_parsed: Value = serde_yaml::from_str(&repeated.yaml)?;
+    assert_eq!(repeated_parsed["tun"]["enable"].as_bool(), Some(true));
+    assert_eq!(repeated_parsed["tun"]["device"].as_str(), Some("utun99"));
 
     Ok(())
 }

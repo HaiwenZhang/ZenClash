@@ -1,6 +1,5 @@
 //! Transactional coordination of System Proxy and TUN capture plans.
 
-use crate::runtime::session::RuntimeConfigurationRevision;
 use std::{
     path::PathBuf,
     pin::Pin,
@@ -8,198 +7,36 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parking_lot::RwLock;
+
+use crate::{
+    ControlledConfigStore, CoreSession, Observation, SystemProxyOwnershipState, SystemProxySession,
+    SystemProxySessionSnapshot, TunCaptureStatus, runtime::session::RuntimeConfigurationRevision,
+};
+
 mod backend;
 use backend::ProductionCaptureBackend;
 mod core_recovery;
 mod error;
 use error::task_failure;
 pub use error::{TrafficCaptureError, TrafficCaptureTask};
-
-use crate::{
-    ControlledConfigStore, CoreSession, Observation, RecoveryAction, SystemProxyOwnershipState,
-    SystemProxySession, SystemProxySessionSnapshot, TunCaptureStatus,
+mod plans;
+#[cfg(test)]
+use plans::failed_snapshot;
+pub use plans::{
+    CaptureOutcome, CapturePlan, ObservedCapturePlan, ServiceLocalRecoveryOutcome,
+    ServiceTunOutcome, TrafficCaptureSnapshot,
 };
+use plans::{
+    has_external_system_proxy, system_proxy_has_intent_or_ownership,
+    system_proxy_is_owned_and_active,
+};
+mod transitions;
 
 type CaptureFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TrafficCaptureError>> + Send + 'a>>;
-
-/// Mutually exclusive capture choice offered by ordinary UI surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CapturePlan {
-    /// Disable ZenClash-owned System Proxy and TUN capture.
-    Off,
-    /// Capture through the native desktop System Proxy.
-    SystemProxy,
-    /// Configure the runtime TUN path after checking platform permission.
-    Tun,
-}
-
-/// Capture combination observed without normalizing pre-existing state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObservedCapturePlan {
-    /// Both System Proxy and TUN are observed or configured off.
-    Off,
-    /// Native System Proxy is active while TUN is configured off.
-    SystemProxy,
-    /// TUN is configured on while native System Proxy is off.
-    TunConfigured,
-    /// System Proxy and TUN are both present; the state is preserved until an explicit choice.
-    Advanced,
-    /// One or more required observations are unavailable.
-    Unknown,
-}
-
-/// Read-only capture state returned by [`TrafficCaptureSession`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrafficCaptureSnapshot {
-    /// System Proxy intent, native readback, and ownership.
-    pub system_proxy: Observation<SystemProxySessionSnapshot>,
-    /// TUN configuration, permission, and runtime activation fact.
-    pub tun: Observation<TunCaptureStatus>,
-    /// Combination derived from trustworthy System Proxy and TUN values.
-    pub observed_plan: ObservedCapturePlan,
-    /// HTTP/Mixed listener available for native proxy capture.
-    pub system_proxy_port: Option<u16>,
-    /// Whether the current runtime core is available.
-    pub core_available: bool,
-}
-
-impl TrafficCaptureSnapshot {
-    fn from_backend(snapshot: CaptureBackendSnapshot) -> Self {
-        let observed_at_ms = now_ms();
-        let system_proxy = Observation::record(
-            &Observation::Loading,
-            snapshot.system_proxy.map_err(|error| error.to_string()),
-            observed_at_ms,
-            RecoveryAction::ReviewCapture,
-        );
-        let tun = Observation::record(
-            &Observation::Loading,
-            snapshot.tun.map_err(|error| error.to_string()),
-            observed_at_ms,
-            RecoveryAction::ReviewCapture,
-        );
-        let observed_plan = observed_capture_plan(&system_proxy, &tun);
-        Self {
-            system_proxy,
-            tun,
-            observed_plan,
-            system_proxy_port: snapshot.system_proxy_port,
-            core_available: snapshot.core_available,
-        }
-    }
-}
-
-/// Result of applying or releasing one capture plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CaptureOutcome {
-    /// The requested plan was applied; the snapshot remains authoritative for activation facts.
-    Applied {
-        /// Explicit user plan.
-        plan: CapturePlan,
-        /// Readback after the operation.
-        snapshot: TrafficCaptureSnapshot,
-    },
-    /// The requested plan already matched current state.
-    Unchanged {
-        /// Current capture snapshot.
-        snapshot: TrafficCaptureSnapshot,
-    },
-    /// A later step failed and the earlier mutation was restored.
-    RolledBack {
-        /// Requested plan that did not complete.
-        plan: CapturePlan,
-        /// Original operation failure.
-        failure: String,
-        /// Readback after rollback.
-        snapshot: TrafficCaptureSnapshot,
-    },
-    /// A partial operation or failed rollback requires explicit reconciliation.
-    ReconcileNeeded {
-        /// Requested plan, when the outcome followed an apply operation.
-        plan: Option<CapturePlan>,
-        /// Combined operation and rollback failure.
-        failure: String,
-        /// Best-effort readback after the uncertain transition.
-        snapshot: TrafficCaptureSnapshot,
-    },
-}
-
-impl CaptureOutcome {
-    /// Returns the latest read-only capture snapshot.
-    #[must_use]
-    pub const fn snapshot(&self) -> &TrafficCaptureSnapshot {
-        match self {
-            Self::Applied { snapshot, .. }
-            | Self::Unchanged { snapshot }
-            | Self::RolledBack { snapshot, .. }
-            | Self::ReconcileNeeded { snapshot, .. } => snapshot,
-        }
-    }
-}
-
-/// Durable configuration receipt paired with the resulting capture observation.
-#[derive(Clone, Debug)]
-pub struct ServiceTunOutcome {
-    core: Option<crate::CoreApplyOutcome>,
-    capture: CaptureOutcome,
-    commit_pending: bool,
-    recovery_warning: Option<String>,
-}
-
-/// Frozen capture observation and the runtime result before native service maintenance.
-pub struct ServiceLocalRecoveryOutcome {
-    before: TrafficCaptureSnapshot,
-    runtime: crate::CoreLocalRecoveryOutcome,
-    capture_revision: u64,
-}
-
-impl ServiceLocalRecoveryOutcome {
-    pub(crate) const fn capture_revision(&self) -> u64 {
-        self.capture_revision
-    }
-
-    /// Reads the capture facts held before owned native capture was released.
-    #[must_use]
-    pub const fn before(&self) -> &TrafficCaptureSnapshot {
-        &self.before
-    }
-
-    /// Reads Local readiness and the scoped resources for a later service handover.
-    #[must_use]
-    pub const fn runtime(&self) -> &crate::CoreLocalRecoveryOutcome {
-        &self.runtime
-    }
-}
-
-impl ServiceTunOutcome {
-    /// Returns a receipt only when business persistence succeeded, including pending finalization.
-    #[must_use]
-    pub const fn core(&self) -> Option<&crate::CoreApplyOutcome> {
-        self.core.as_ref()
-    }
-    /// Returns capture success, confirmed rollback, or reconciliation needed after an uncertain result.
-    #[must_use]
-    pub const fn capture(&self) -> &CaptureOutcome {
-        &self.capture
-    }
-
-    /// Reports an accepted configuration whose native commit still needs confirmation.
-    #[must_use]
-    pub const fn commit_pending(&self) -> bool {
-        self.commit_pending
-    }
-
-    /// Reads a capture or cleanup warning that native commit confirmation cannot resolve.
-    #[must_use]
-    pub fn recovery_warning(&self) -> Option<&str> {
-        self.recovery_warning.as_deref()
-    }
-}
 
 /// Deep module serializing capture plan changes and partial-failure recovery.
 #[derive(Clone)]
@@ -208,12 +45,6 @@ pub struct TrafficCaptureSession {
     profile: Arc<RwLock<Option<PathBuf>>>,
     operation: Arc<tokio::sync::Mutex<()>>,
     intent_revision: Arc<AtomicU64>,
-}
-
-enum CaptureOperation {
-    Apply(CapturePlan),
-    Reconcile,
-    Release,
 }
 
 impl TrafficCaptureSession {
@@ -471,17 +302,6 @@ impl TrafficCaptureSession {
         Ok(())
     }
 
-    /// Applies one ordinary capture plan with rollback after partial failure.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error before partial mutation, including missing profiles,
-    /// unavailable permissions, and external System Proxy ownership conflicts.
-    pub async fn apply(&self, plan: CapturePlan) -> Result<CaptureOutcome, TrafficCaptureError> {
-        self.note_capture_intent();
-        self.complete_admitted(CaptureOperation::Apply(plan)).await
-    }
-
     /// Enables TUN through one admitted service handover and configuration transaction.
     /// `Some` supplies an authenticated helper for a local handover; `None` reuses the current service owner.
     ///
@@ -639,260 +459,6 @@ impl TrafficCaptureSession {
         })
     }
 
-    async fn apply_admitted(
-        &self,
-        plan: CapturePlan,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        let mut before = self.snapshot_from_backend().await?;
-        if plan_matches(plan, &before) {
-            return Ok(CaptureOutcome::Unchanged { snapshot: before });
-        }
-        if plan == CapturePlan::SystemProxy && before.system_proxy_port.is_none() {
-            self.backend.resync_runtime_profile().await?;
-            before = self.snapshot_from_backend().await?;
-            if plan_matches(plan, &before) {
-                return Ok(CaptureOutcome::Unchanged { snapshot: before });
-            }
-        }
-        if plan != CapturePlan::SystemProxy && has_external_system_proxy(&before) {
-            return Err(TrafficCaptureError::ExternalSystemProxy);
-        }
-        match plan {
-            CapturePlan::Off => self.apply_off(before).await,
-            CapturePlan::SystemProxy => self.apply_system_proxy(before).await,
-            CapturePlan::Tun => self.apply_tun(before).await,
-        }
-    }
-
-    /// Reconciles persistent System Proxy intent without normalizing an
-    /// existing System Proxy + TUN advanced combination.
-    ///
-    /// # Errors
-    ///
-    /// Returns a backend error when no trustworthy snapshot can be produced.
-    pub async fn reconcile(&self) -> Result<CaptureOutcome, TrafficCaptureError> {
-        self.complete_admitted(CaptureOperation::Reconcile).await
-    }
-
-    async fn reconcile_admitted(&self) -> Result<CaptureOutcome, TrafficCaptureError> {
-        if let Err(failure) = self.backend.reconcile().await {
-            return Ok(CaptureOutcome::ReconcileNeeded {
-                plan: None,
-                snapshot: self.best_effort_snapshot().await,
-                failure: failure.to_string(),
-            });
-        }
-        Ok(CaptureOutcome::Unchanged {
-            snapshot: self.snapshot_from_backend().await?,
-        })
-    }
-
-    /// Releases only native state that still matches ZenClash ownership.
-    ///
-    /// # Errors
-    ///
-    /// Returns a backend error when release or readback fails.
-    pub async fn release_owned(&self) -> Result<CaptureOutcome, TrafficCaptureError> {
-        self.complete_admitted(CaptureOperation::Release).await
-    }
-
-    async fn release_admitted(&self) -> Result<CaptureOutcome, TrafficCaptureError> {
-        if let Err(failure) = self.backend.release_owned().await {
-            return Ok(CaptureOutcome::ReconcileNeeded {
-                plan: None,
-                snapshot: self.best_effort_snapshot().await,
-                failure: failure.to_string(),
-            });
-        }
-        Ok(CaptureOutcome::Unchanged {
-            snapshot: self.snapshot_from_backend().await?,
-        })
-    }
-
-    async fn complete_admitted(
-        &self,
-        operation: CaptureOperation,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        // Cancellation while queuing creates no completion task. Once admitted,
-        // completion retains the guard through native writes, readback and rollback.
-        let guard = self.operation.clone().lock_owned().await;
-        let session = self.clone();
-        tokio::spawn(async move {
-            let _guard = guard;
-            match operation {
-                CaptureOperation::Apply(plan) => session.apply_admitted(plan).await,
-                CaptureOperation::Reconcile => session.reconcile_admitted().await,
-                CaptureOperation::Release => session.release_admitted().await,
-            }
-        })
-        .await
-        .map_err(|source| task_failure(TrafficCaptureTask::Completion, source))?
-    }
-
-    async fn apply_off(
-        &self,
-        before: TrafficCaptureSnapshot,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        let system_was_owned = system_proxy_is_owned_and_active(&before);
-        if system_proxy_has_intent_or_ownership(&before) {
-            self.backend.set_system_proxy(false, 0).await?;
-        }
-        let tun_was_configured = tun_is_configured(&before);
-        if tun_was_configured && let Err(failure) = self.backend.set_tun(false).await {
-            let rollback = if system_was_owned {
-                self.restore_system_proxy(&before).await
-            } else {
-                Ok(())
-            };
-            return Ok(self
-                .failed_outcome(CapturePlan::Off, failure, rollback)
-                .await);
-        }
-        self.applied(CapturePlan::Off, &before).await
-    }
-
-    async fn apply_system_proxy(
-        &self,
-        before: TrafficCaptureSnapshot,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        let port = before
-            .system_proxy_port
-            .ok_or_else(|| TrafficCaptureError::MissingSystemProxyPort)?;
-        let tun_was_configured = tun_is_configured(&before);
-        if tun_was_configured {
-            self.backend.set_tun(false).await?;
-            let snapshot = self.snapshot_from_backend().await?;
-            if snapshot.tun.value().is_none_or(|tun| tun.configured) {
-                return Ok(CaptureOutcome::ReconcileNeeded {
-                    plan: Some(CapturePlan::SystemProxy),
-                    failure: zenclash_i18n::text("traffic_capture.errors.tun_disable_unconfirmed"),
-                    snapshot,
-                });
-            }
-        }
-        if let Err(failure) = self.backend.set_system_proxy(true, port).await {
-            let rollback = if tun_was_configured {
-                self.backend.set_tun(true).await
-            } else {
-                Ok(())
-            };
-            return Ok(self
-                .failed_outcome(CapturePlan::SystemProxy, failure, rollback)
-                .await);
-        }
-        self.applied(CapturePlan::SystemProxy, &before).await
-    }
-
-    async fn apply_tun(
-        &self,
-        before: TrafficCaptureSnapshot,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        self.backend.ensure_tun_permission().await?;
-        let tun_was_configured = tun_is_configured(&before);
-        if !tun_was_configured {
-            self.backend.set_tun(true).await?;
-        }
-        if system_proxy_has_intent_or_ownership(&before)
-            && let Err(failure) = self.backend.set_system_proxy(false, 0).await
-        {
-            let rollback = if tun_was_configured {
-                Ok(())
-            } else {
-                self.backend.set_tun(false).await
-            };
-            return Ok(self
-                .failed_outcome(CapturePlan::Tun, failure, rollback)
-                .await);
-        }
-        self.applied(CapturePlan::Tun, &before).await
-    }
-
-    async fn restore_system_proxy(
-        &self,
-        before: &TrafficCaptureSnapshot,
-    ) -> Result<(), TrafficCaptureError> {
-        let port = before
-            .system_proxy_port
-            .or_else(|| {
-                before
-                    .system_proxy
-                    .value()
-                    .map(|snapshot| snapshot.actual.port)
-                    .filter(|port| *port != 0)
-            })
-            .ok_or(TrafficCaptureError::MissingSystemProxyPort)?;
-        self.backend.set_system_proxy(true, port).await
-    }
-
-    async fn applied(
-        &self,
-        plan: CapturePlan,
-        before: &TrafficCaptureSnapshot,
-    ) -> Result<CaptureOutcome, TrafficCaptureError> {
-        let snapshot = self.snapshot_from_backend().await?;
-        if !plan_matches(plan, &snapshot) {
-            return Ok(CaptureOutcome::ReconcileNeeded {
-                plan: Some(plan),
-                failure: zenclash_i18n::text("traffic_capture.errors.plan_unconfirmed"),
-                snapshot,
-            });
-        }
-        // Match Clash Verge's system-proxy cleanup. TUN teardown belongs to
-        // Mihomo; clearing every connection here also disrupts unrelated pools.
-        let retiring_system_proxy = system_proxy_is_owned_and_active(before)
-            && !system_proxy_is_owned_and_active(&snapshot);
-        if retiring_system_proxy && let Err(error) = self.backend.close_owned_connections().await {
-            return Ok(CaptureOutcome::ReconcileNeeded {
-                plan: Some(plan),
-                failure: zenclash_i18n::text_with(
-                    "traffic_capture.errors.connections_cleanup",
-                    &[("error", error.to_string())],
-                ),
-                snapshot,
-            });
-        }
-        Ok(CaptureOutcome::Applied { plan, snapshot })
-    }
-
-    async fn failed_outcome(
-        &self,
-        plan: CapturePlan,
-        failure: TrafficCaptureError,
-        rollback: Result<(), TrafficCaptureError>,
-    ) -> CaptureOutcome {
-        let snapshot = self.best_effort_snapshot().await;
-        match rollback {
-            Ok(()) if failure.is_native_recovery_unconfirmed() => CaptureOutcome::ReconcileNeeded {
-                plan: Some(plan),
-                failure: failure.to_string(),
-                snapshot,
-            },
-            Ok(()) => CaptureOutcome::RolledBack {
-                plan,
-                failure: failure.to_string(),
-                snapshot,
-            },
-            Err(rollback) => CaptureOutcome::ReconcileNeeded {
-                plan: Some(plan),
-                failure: format!("{failure}；回滚失败：{rollback}"),
-                snapshot,
-            },
-        }
-    }
-
-    async fn snapshot_from_backend(&self) -> Result<TrafficCaptureSnapshot, TrafficCaptureError> {
-        self.backend
-            .snapshot()
-            .await
-            .map(TrafficCaptureSnapshot::from_backend)
-    }
-
-    async fn best_effort_snapshot(&self) -> TrafficCaptureSnapshot {
-        self.snapshot_from_backend()
-            .await
-            .unwrap_or_else(|error| failed_snapshot(error.to_string()))
-    }
-
     #[cfg(all(test, feature = "service-ipc-tests"))]
     pub(crate) fn with_unowned_capture_for_test(core: &CoreSession) -> Self {
         let mut capture = Self::with_backend(Arc::new(tests::FakeBackend::unowned_for_test()));
@@ -976,93 +542,6 @@ trait CaptureBackend: Send + Sync {
     fn close_owned_connections(&self) -> CaptureFuture<'_, ()>;
     fn reconcile(&self) -> CaptureFuture<'_, ()>;
     fn release_owned(&self) -> CaptureFuture<'_, ()>;
-}
-
-fn observed_capture_plan(
-    system_proxy: &Observation<SystemProxySessionSnapshot>,
-    tun: &Observation<TunCaptureStatus>,
-) -> ObservedCapturePlan {
-    let (Some(system_proxy), Some(tun)) = (system_proxy.value(), tun.value()) else {
-        return ObservedCapturePlan::Unknown;
-    };
-    match (system_proxy.actual.active(), tun.configured) {
-        (false, false) => ObservedCapturePlan::Off,
-        (true, false) => ObservedCapturePlan::SystemProxy,
-        (false, true) => ObservedCapturePlan::TunConfigured,
-        (true, true) => ObservedCapturePlan::Advanced,
-    }
-}
-
-fn plan_matches(plan: CapturePlan, snapshot: &TrafficCaptureSnapshot) -> bool {
-    match plan {
-        CapturePlan::Off => {
-            snapshot.observed_plan == ObservedCapturePlan::Off
-                && snapshot.system_proxy.value().is_some_and(|system_proxy| {
-                    !system_proxy.intent_enabled
-                        && system_proxy.ownership == SystemProxyOwnershipState::Unowned
-                })
-        }
-        CapturePlan::SystemProxy => {
-            snapshot.observed_plan == ObservedCapturePlan::SystemProxy
-                && snapshot.system_proxy.value().is_some_and(|system_proxy| {
-                    system_proxy.intent_enabled
-                        && system_proxy.ownership == SystemProxyOwnershipState::Owned
-                })
-        }
-        CapturePlan::Tun => snapshot.observed_plan == ObservedCapturePlan::TunConfigured,
-    }
-}
-
-fn has_external_system_proxy(snapshot: &TrafficCaptureSnapshot) -> bool {
-    snapshot.system_proxy.value().is_some_and(|system_proxy| {
-        system_proxy.actual.active() && system_proxy.ownership != SystemProxyOwnershipState::Owned
-    })
-}
-
-fn system_proxy_is_owned_and_active(snapshot: &TrafficCaptureSnapshot) -> bool {
-    snapshot.system_proxy.value().is_some_and(|system_proxy| {
-        system_proxy.actual.active() && system_proxy.ownership == SystemProxyOwnershipState::Owned
-    })
-}
-
-fn system_proxy_has_intent_or_ownership(snapshot: &TrafficCaptureSnapshot) -> bool {
-    snapshot.system_proxy.value().is_some_and(|system_proxy| {
-        system_proxy.intent_enabled || system_proxy.ownership == SystemProxyOwnershipState::Owned
-    })
-}
-
-fn tun_is_configured(snapshot: &TrafficCaptureSnapshot) -> bool {
-    snapshot.tun.value().is_some_and(|tun| tun.configured)
-}
-
-fn failed_snapshot(failure: String) -> TrafficCaptureSnapshot {
-    let failure = crate::OperationalFailure {
-        message: failure,
-        occurred_at_ms: now_ms(),
-    };
-    TrafficCaptureSnapshot {
-        system_proxy: Observation::Failed {
-            failure: failure.clone(),
-            recovery: RecoveryAction::ReviewCapture,
-        },
-        tun: Observation::Failed {
-            failure,
-            recovery: RecoveryAction::ReviewCapture,
-        },
-        observed_plan: ObservedCapturePlan::Unknown,
-        system_proxy_port: None,
-        core_available: false,
-    }
-}
-
-fn now_ms() -> u64 {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-    )
-    .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
