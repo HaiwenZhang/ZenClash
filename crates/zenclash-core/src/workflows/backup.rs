@@ -1,0 +1,559 @@
+//! Versioned local backup and transactional restore of authoritative app data.
+
+use std::path::{Path, PathBuf};
+
+use thiserror::Error;
+
+use crate::{
+    AppPreferencesError, AppPreferencesStore, ControlledConfigError, ControlledConfigStore,
+    ProfileStoreError, YamlOverrideError,
+};
+
+mod archive;
+mod recovery;
+mod transaction;
+
+#[cfg(test)]
+mod tests;
+
+const MANIFEST_PATH: &str = "manifest.json";
+const PREFERENCES_PATH: &str = "preferences.json";
+const CONTROLLED_PATH: &str = "controlled-config/override.yaml";
+const PROFILE_INDEX_PATH: &str = "profiles/profiles.json";
+const YAML_OVERRIDE_INDEX_PATH: &str = "yaml-overrides/overrides.json";
+const BACKUP_FORMAT_VERSION: u32 = 2;
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_BACKUP_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BACKUP_FILES: usize = 4096;
+
+pub(crate) use crate::platform::data_coordinator::ensure_writes_available;
+
+/// Errors produced while exporting, validating, or restoring a local backup.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum BackupError {
+    /// Filesystem access failed.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.io", &[("error", .0.to_string())])
+    )]
+    Io(#[from] std::io::Error),
+    /// ZIP encoding or decoding failed.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.zip", &[("error", .0.to_string())])
+    )]
+    Zip(#[from] zip::result::ZipError),
+    /// The backup manifest could not be encoded or decoded.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.json", &[("error", .0.to_string())])
+    )]
+    Json(#[from] serde_json::Error),
+    /// Application preferences in the snapshot are invalid.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.preferences", &[("error", .0.to_string())])
+    )]
+    Preferences(#[from] AppPreferencesError),
+    /// Controlled Mihomo configuration in the snapshot is invalid.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.controlled", &[("error", .0.to_string())])
+    )]
+    Controlled(#[from] ControlledConfigError),
+    /// Profile catalog or YAML data in the snapshot is invalid.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.profiles", &[("error", .0.to_string())])
+    )]
+    Profiles(#[from] ProfileStoreError),
+    /// Managed YAML override catalog or payload is invalid.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.yaml_overrides", &[("error", .0.to_string())])
+    )]
+    YamlOverrides(#[from] YamlOverrideError),
+    /// The archive violates the versioned format or a security constraint.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.invalid_archive", &[("error", .0.clone())])
+    )]
+    InvalidArchive(String),
+    /// The archive or its expanded payload exceeded the defensive limit.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.too_large", &[("error", .0.clone())])
+    )]
+    TooLarge(String),
+    /// A platform application-data directory could not be determined.
+    #[error("{}", zenclash_i18n::text("backup.errors.missing_data_directory"))]
+    MissingDataDirectory,
+    /// Activation or rollback could not be completed consistently.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("backup.errors.transaction", &[("error", .0.clone())])
+    )]
+    Transaction(String),
+}
+
+/// Result type returned by local backup operations.
+pub type BackupResult<T> = Result<T, BackupError>;
+
+/// Metadata returned after a backup archive is written successfully.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupExportSummary {
+    /// Destination ZIP path.
+    pub path: PathBuf,
+    /// Number of authoritative data files included in the manifest.
+    pub file_count: usize,
+    /// Total uncompressed authoritative payload bytes.
+    pub payload_bytes: u64,
+}
+
+/// Current authoritative data, read after any active restore completes.
+#[derive(Clone, Debug)]
+pub struct BackupDataSnapshot {
+    /// Latest persisted application preferences.
+    pub preferences: crate::AppPreferences,
+    /// Latest managed-profile index.
+    pub profiles: crate::ProfileCatalog,
+    /// Latest controlled configuration layer.
+    pub controlled_config: serde_json::Value,
+    /// Latest ordered YAML override index.
+    pub overrides: crate::YamlOverrideCatalog,
+}
+
+/// A coherent backup-data read and the preferences source captured during that read.
+#[derive(Clone, Debug)]
+pub struct ObservedBackupSnapshot {
+    snapshot: BackupDataSnapshot,
+    preferences: crate::AppPreferencesObservation,
+}
+
+impl ObservedBackupSnapshot {
+    /// Moves the data and its preferences publication source to the consumer.
+    #[must_use]
+    pub fn into_parts(self) -> (BackupDataSnapshot, crate::AppPreferencesObservation) {
+        (self.snapshot, self.preferences)
+    }
+}
+
+/// Coordinates local backup export and transactional restore for one data root.
+#[derive(Clone, Debug)]
+pub struct BackupManager {
+    data_root: PathBuf,
+}
+
+impl BackupManager {
+    /// Opens the platform-default `ZenClash` application-data root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the platform data location cannot be determined.
+    pub fn discover() -> BackupResult<Self> {
+        let preferences = AppPreferencesStore::discover()?;
+        let data_root = preferences
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(BackupError::MissingDataDirectory)?;
+        Ok(Self::new(data_root))
+    }
+
+    /// Creates a backup manager rooted at an explicit application-data path.
+    #[must_use]
+    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+        Self {
+            data_root: data_root.into(),
+        }
+    }
+
+    /// Returns the application-data root managed by this instance.
+    #[must_use]
+    pub fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    /// Recovers an interrupted restore, or cleans up a previously committed restore.
+    /// Call after taking the application instance lock and before opening data stores.
+    /// Run on a blocking worker when the application event loop is active.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid journal or failed recovery. Do not start
+    /// the core or read partially restored data after a recovery error.
+    pub fn recover_interrupted_restore(&self) -> BackupResult<bool> {
+        let mut scopes = transaction::write_scopes(&self.data_root);
+        scopes.push(self.data_root.clone());
+        let _lease = crate::platform::data_coordinator::DataWriteLease::exclusive(scopes);
+        let Some(mut journal) = recovery::RestoreJournal::read(&self.data_root)? else {
+            return Ok(false);
+        };
+        AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH)).invalidate_observations();
+        journal.recover(&self.data_root)?;
+        Ok(true)
+    }
+
+    /// Reads authoritative state without observing an unfinished restore.
+    ///
+    /// Run on a blocking worker. The exclusive root and physical managed-directory
+    /// scopes remain reserved throughout the read; store construction reuses
+    /// that authority instead of acquiring a nested lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns filesystem or persisted-data decoding errors.
+    pub fn read_snapshot(&self) -> BackupResult<BackupDataSnapshot> {
+        Ok(self.read_observed_snapshot()?.snapshot)
+    }
+
+    /// Reads all backup facts and preferences eligibility under the same original root scope.
+    /// Run on a blocking worker. No write authority escapes in the returned observation.
+    ///
+    /// # Errors
+    /// Returns filesystem or persisted-data decoding errors.
+    pub fn read_observed_snapshot(&self) -> BackupResult<ObservedBackupSnapshot> {
+        let mut scopes = transaction::write_scopes(&self.data_root);
+        scopes.push(self.data_root.clone());
+        let lease = crate::platform::data_coordinator::DataWriteLease::exclusive(scopes);
+        ensure_writes_available(lease.scopes())?;
+        let profiles = crate::ProfileStore::open(self.data_root.join("profiles"), Some(&lease))?;
+        let overrides =
+            crate::YamlOverrideStore::open(self.data_root.join("yaml-overrides"), Some(&lease))?;
+        let preferences = AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH))
+            .with_write_lease(&lease)
+            .observe()?;
+        let snapshot = BackupDataSnapshot {
+            preferences: preferences.preferences().clone(),
+            profiles: profiles.load()?,
+            controlled_config: ControlledConfigStore::new(self.data_root.join("controlled-config"))
+                .load_json()?,
+            overrides: overrides.load()?,
+        };
+        Ok(ObservedBackupSnapshot {
+            snapshot,
+            preferences,
+        })
+    }
+
+    /// Writes a versioned ZIP containing the current authoritative app data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when current state is invalid, exceeds limits, or the
+    /// destination cannot be written atomically.
+    pub fn export_to(&self, destination: impl AsRef<Path>) -> BackupResult<BackupExportSummary> {
+        archive::export(self, destination.as_ref())
+    }
+
+    /// Validates and stages a backup without changing live application data.
+    ///
+    /// The returned value must be activated explicitly. Archive paths, file
+    /// types, sizes, manifest checksums, preferences, and all profile YAML are
+    /// validated before this method succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable, unsafe, incompatible, or invalid data.
+    pub fn prepare_restore(
+        &self,
+        archive: impl AsRef<Path>,
+    ) -> BackupResult<PreparedBackupRestore> {
+        archive::prepare_restore(self, archive.as_ref())
+    }
+}
+
+/// A completely validated backup extracted into an isolated staging directory.
+pub struct PreparedBackupRestore {
+    data_root: PathBuf,
+    staging_root: PathBuf,
+    file_count: usize,
+    payload_bytes: u64,
+    previous_runtime: Option<(
+        crate::runtime::launcher::RuntimeConfigurationRevision,
+        crate::CoreRestoreSnapshot,
+    )>,
+}
+
+impl std::fmt::Debug for PreparedBackupRestore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedBackupRestore")
+            .field("data_root", &self.data_root)
+            .field("staging_root", &self.staging_root)
+            .field("file_count", &self.file_count)
+            .field("payload_bytes", &self.payload_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedBackupRestore {
+    pub(crate) fn retain_runtime(
+        &mut self,
+        expected: crate::runtime::launcher::RuntimeConfigurationRevision,
+        snapshot: crate::CoreRestoreSnapshot,
+    ) {
+        self.previous_runtime = Some((expected, snapshot));
+    }
+    pub(crate) fn runtime_candidate(&self) -> BackupResult<BackupRuntimeCandidate> {
+        let lease =
+            crate::platform::data_coordinator::DataWriteLease::shared([self.staging_root.clone()])?;
+        BackupRuntimeCandidate::read(&self.staging_root, &self.data_root, &lease)
+    }
+
+    /// Number of authoritative files validated in the archive.
+    #[must_use]
+    pub const fn file_count(&self) -> usize {
+        self.file_count
+    }
+
+    /// Total uncompressed authoritative payload bytes.
+    #[must_use]
+    pub const fn payload_bytes(&self) -> u64 {
+        self.payload_bytes
+    }
+
+    /// Atomically swaps staged authoritative data into the live root.
+    ///
+    /// The returned transaction automatically restores the previous snapshot
+    /// unless [`BackupRestoreTransaction::commit`] is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when activation or its immediate rollback fails.
+    pub fn activate(self) -> BackupResult<BackupRestoreTransaction> {
+        transaction::activate(self, None)
+    }
+
+    /// Activates a restore while also reserving the session's actual runtime paths.
+    ///
+    /// Runtime homes can be outside the restored root. All scopes are acquired
+    /// together before any swap and retained through commit or rollback. Call
+    /// from a blocking worker, as activation may wait for existing writers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when activation or its immediate rollback fails.
+    pub fn activate_for_session(
+        self,
+        session: &crate::CoreSession,
+    ) -> BackupResult<BackupRestoreTransaction> {
+        transaction::activate(self, Some(session))
+    }
+}
+
+pub(crate) use crate::runtime::controlled::BackupRuntimeCandidate;
+
+impl BackupRuntimeCandidate {
+    fn read(
+        source: &Path,
+        destination: &Path,
+        lease: &crate::platform::data_coordinator::DataWriteLease,
+    ) -> BackupResult<Self> {
+        let profiles = crate::ProfileStore::open(source.join("profiles"), Some(lease))?;
+        let profile = profiles.active_path()?.ok_or_else(|| {
+            BackupError::InvalidArchive(zenclash_i18n::text("backup.errors.missing_profile"))
+        })?;
+        let overrides = crate::YamlOverrideStore::open(source.join("yaml-overrides"), Some(lease))?;
+        let paths = overrides.enabled_paths(&overrides.load()?);
+        let controlled =
+            ControlledConfigStore::new(source.join("controlled-config")).with_write_lease(lease);
+        let payload = controlled.effective_with_overrides(&profile, &paths)?;
+        let patch = crate::storage::profiles::read_profile_bytes(&source.join(CONTROLLED_PATH))?;
+        let relocate = |path: &Path| {
+            path.strip_prefix(source)
+                .map(|relative| destination.join(relative))
+                .map_err(|error| BackupError::InvalidArchive(error.to_string()))
+        };
+        Ok(Self {
+            data_root: destination.to_path_buf(),
+            profile: relocate(&profile)?,
+            overrides: paths
+                .iter()
+                .map(|path| relocate(path))
+                .collect::<BackupResult<_>>()?,
+            payload,
+            patch,
+        })
+    }
+
+    pub(crate) fn validate_live(
+        &self,
+        lease: &crate::platform::data_coordinator::DataWriteLease,
+    ) -> BackupResult<()> {
+        if Self::read(&self.data_root, &self.data_root, lease)? != *self {
+            return Err(BackupError::Transaction(zenclash_i18n::text(
+                "core_page.service.stale",
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PreparedBackupRestore {
+    fn drop(&mut self) {
+        if self.staging_root.exists()
+            && let Err(error) = std::fs::remove_dir_all(&self.staging_root)
+        {
+            tracing::warn!(%error, path = %self.staging_root.display(), "failed to remove backup staging directory");
+        }
+    }
+}
+
+/// Reversible activation of an imported backup snapshot.
+pub struct BackupRestoreTransaction {
+    data_root: PathBuf,
+    rollback_root: PathBuf,
+    journal: recovery::RestoreJournal,
+    active: bool,
+    previous_runtime: Option<crate::CoreRestoreSnapshot>,
+    lease: crate::platform::data_coordinator::DataWriteLease,
+}
+
+impl std::fmt::Debug for BackupRestoreTransaction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BackupRestoreTransaction")
+            .field("data_root", &self.data_root)
+            .field("rollback_root", &self.rollback_root)
+            .field("active", &self.active)
+            .field("has_previous_runtime", &self.previous_runtime.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BackupRestoreTransaction {
+    /// Reads preferences under this restore's existing data authority.
+    /// The returned observation cannot publish while the restore is active and carries no write lease.
+    ///
+    /// # Errors
+    /// Returns a preferences read or validation error.
+    pub fn observe_preferences(&self) -> BackupResult<crate::AppPreferencesObservation> {
+        Ok(
+            AppPreferencesStore::new(self.data_root.join(PREFERENCES_PATH))
+                .with_write_lease(&self.lease)
+                .observe()?,
+        )
+    }
+
+    /// Returns the committed runtime captured after exclusion and before disk activation.
+    ///
+    /// Present only for [`PreparedBackupRestore::activate_for_session`]. The
+    /// snapshot replays exact accepted configuration without rereading source YAML.
+    #[must_use]
+    pub fn previous_runtime_snapshot(&self) -> Option<crate::CoreRestoreSnapshot> {
+        self.previous_runtime.clone()
+    }
+
+    /// Opens the restored profile store under this transaction's exclusive authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the managed directory cannot be initialized.
+    pub fn profile_store(&self) -> BackupResult<crate::ProfileStore> {
+        Ok(crate::ProfileStore::open(
+            self.data_root.join("profiles"),
+            Some(&self.lease),
+        )?)
+    }
+
+    /// Opens restored overrides under this transaction's exclusive authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the managed directory cannot be initialized.
+    pub fn yaml_override_store(&self) -> BackupResult<crate::YamlOverrideStore> {
+        Ok(crate::YamlOverrideStore::open(
+            self.data_root.join("yaml-overrides"),
+            Some(&self.lease),
+        )?)
+    }
+
+    /// Authorizes controlled-cache writes while the restored runtime is validated.
+    /// The returned store's authority expires when the transaction is consumed or dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store is outside the restored data root.
+    pub fn authorize_controlled_store(
+        &self,
+        store: crate::ControlledConfigStore,
+    ) -> BackupResult<crate::ControlledConfigStore> {
+        if !crate::platform::data_coordinator::path_within(store.root(), &self.data_root)
+            || !self.lease.covers(store.root())
+        {
+            return Err(BackupError::Transaction(
+                "受控配置不属于此次恢复的数据目录".into(),
+            ));
+        }
+        Ok(store.with_write_lease(&self.lease))
+    }
+
+    /// Keeps the restored snapshot and removes the previous-data rollback copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the commit cannot be recorded or cleanup fails.
+    /// A failed commit is rolled back; a cleanup failure leaves imported data active.
+    pub fn commit(mut self) -> BackupResult<()> {
+        self.commit_in_place()?;
+        self.journal.cleanup(&self.data_root)
+    }
+
+    /// Durably commits disk state while retaining exclusive authority for runtime recovery.
+    /// Callers that already applied imported runtime state must roll it back if this fails.
+    /// Consume with [`Self::commit`] afterward to clean up the rollback copy.
+    ///
+    /// # Errors
+    /// Returns a journal write error without relinquishing the rollback transaction.
+    pub fn commit_in_place(&mut self) -> BackupResult<()> {
+        if self.active {
+            self.journal.commit(&self.data_root)?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    /// Restores the complete authoritative snapshot that preceded activation.
+    /// Successfully restored items are retained if a later step fails and
+    /// dropping the transaction retries its remaining work.
+    /// If rollback remains unfinished, ordinary writes are refused until
+    /// [`BackupManager::recover_interrupted_restore`] succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any live item cannot be removed or restored, or
+    /// when the empty transaction directories cannot be removed afterward.
+    pub fn rollback(mut self) -> BackupResult<()> {
+        self.rollback_in_place()
+    }
+
+    /// Restores the preceding disk snapshot while retaining exclusive write authority.
+    ///
+    /// Use this after the runtime accepted imported data: reconcile the previous
+    /// runtime through this transaction's authorized stores before dropping it.
+    /// A successful disk rollback disables automatic rollback, but ordinary
+    /// writers remain blocked until this transaction is consumed or dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a removal, restoration, or cleanup error. Successful moves are
+    /// retained, so a retry or drop only performs the remaining rollback work.
+    pub fn rollback_in_place(&mut self) -> BackupResult<()> {
+        if self.active {
+            transaction::rollback(self)?;
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BackupRestoreTransaction {
+    fn drop(&mut self) {
+        if self.active
+            && let Err(error) = transaction::rollback(self)
+        {
+            tracing::error!(%error, "failed to roll back uncommitted backup restore");
+        }
+    }
+}

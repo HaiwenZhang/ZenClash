@@ -1,0 +1,910 @@
+//! Serialized, bounded persistence for the live Mihomo log stream.
+
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{self, RecvTimeoutError, SyncSender, TryRecvError, TrySendError},
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+use parking_lot::{Mutex, RwLock};
+use thiserror::Error;
+
+use super::{LogEntry, format_log_entries, private_io};
+
+const MEBIBYTE: u64 = 1024 * 1024;
+const MIN_MAX_MEBIBYTES: u16 = 1;
+const MAX_MAX_MEBIBYTES: u16 = 100;
+const FILE_QUEUE_CAPACITY: usize = 512;
+const FILE_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WRITE_BATCH_ENTRIES: usize = 64;
+const MAX_WRITE_BATCH_BYTES: usize = 64 * 1024;
+const COMPACTION_RETAIN_PERCENT: u64 = 50;
+const TRUNCATE_MARKER: &[u8] =
+    b"\n[ZENCLASH] Log compacted after reaching the configured size limit.\n";
+
+/// Errors produced while configuring or writing continuous Mihomo logs.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum LogPersistenceError {
+    /// The configured limit is outside the supported range.
+    #[error("{}", zenclash_i18n::text("logs.errors.invalid_limit"))]
+    InvalidLimit,
+    /// Filesystem access failed.
+    #[error(
+        "{}",
+        zenclash_i18n::text_with("logs.errors.io", &[("error", .0.to_string())])
+    )]
+    Io(#[from] std::io::Error),
+}
+
+/// Result type returned by persistent-log operations.
+pub type LogPersistenceResult<T> = Result<T, LogPersistenceError>;
+
+/// Current state of the continuous Mihomo log writer.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LogPersistenceStatus {
+    /// Whether new entries are configured to be written.
+    pub enabled: bool,
+    /// Target file, when persistence has been configured.
+    pub path: Option<PathBuf>,
+    /// Configured maximum file size in bytes.
+    pub max_bytes: u64,
+    /// Last successfully observed file size.
+    pub size_bytes: u64,
+    /// Entries discarded because of queue capacity or the per-entry byte limit.
+    pub dropped_entries: u64,
+    /// Most recent writer error, cleared after a successful write.
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct LogFileConfig {
+    path: PathBuf,
+    enabled: bool,
+    max_bytes: u64,
+}
+
+impl LogFileConfig {
+    fn from_mebibytes(
+        path: PathBuf,
+        enabled: bool,
+        max_mebibytes: u16,
+    ) -> LogPersistenceResult<Self> {
+        if !(MIN_MAX_MEBIBYTES..=MAX_MAX_MEBIBYTES).contains(&max_mebibytes) {
+            return Err(LogPersistenceError::InvalidLimit);
+        }
+        Ok(Self {
+            path,
+            enabled,
+            max_bytes: u64::from(max_mebibytes) * MEBIBYTE,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_bytes(path: PathBuf, enabled: bool, max_bytes: u64) -> Self {
+        Self {
+            path,
+            enabled,
+            max_bytes,
+        }
+    }
+}
+
+enum LogFileCommand {
+    Append(Arc<LogEntry>, LogByteReservation),
+    Refresh,
+    Shutdown,
+}
+
+struct LogByteReservation {
+    queued_bytes: Arc<AtomicUsize>,
+    queued_entries: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl Drop for LogByteReservation {
+    fn drop(&mut self) {
+        self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.queued_entries.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct LogFileSender {
+    sender: Arc<RwLock<Option<SyncSender<LogFileCommand>>>>,
+    settings: Arc<RwLock<Option<LogFileConfig>>>,
+    status: Arc<RwLock<LogPersistenceStatus>>,
+    queued_bytes: Arc<AtomicUsize>,
+    queued_entries: Arc<AtomicUsize>,
+}
+
+impl LogFileSender {
+    pub(super) fn append(&self, entry: Arc<LogEntry>, bytes: usize) {
+        if !self
+            .settings
+            .read()
+            .as_ref()
+            .is_some_and(|settings| settings.enabled)
+        {
+            return;
+        }
+        let Some(channel) = self.sender.read().clone() else {
+            return;
+        };
+        if bytes > super::MAX_LOG_ENTRY_BYTES {
+            let mut status = self.status.write();
+            status.dropped_entries = status.dropped_entries.saturating_add(1);
+            status.last_error = Some(zenclash_i18n::text("logs.errors.entry_too_large"));
+            return;
+        }
+        let reserved = self
+            .queued_bytes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(bytes)
+                    .filter(|next| *next <= FILE_QUEUE_BYTES)
+            })
+            .is_ok();
+        if !reserved {
+            self.record_full_queue();
+            return;
+        }
+        self.queued_entries.fetch_add(1, Ordering::AcqRel);
+        let reservation = LogByteReservation {
+            queued_bytes: self.queued_bytes.clone(),
+            queued_entries: self.queued_entries.clone(),
+            bytes,
+        };
+        match channel.try_send(LogFileCommand::Append(entry, reservation)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.record_full_queue();
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.status.write().last_error = Some("日志文件写入线程已停止".into());
+            }
+        }
+    }
+
+    fn record_full_queue(&self) {
+        let mut status = self.status.write();
+        status.dropped_entries = status.dropped_entries.saturating_add(1);
+        status.last_error = Some("日志磁盘队列已满；已丢弃一条落盘记录".into());
+    }
+}
+
+pub(super) struct LogFileWorker {
+    sender: LogFileSender,
+    thread: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for LogFileWorker {
+    fn drop(&mut self) {
+        if let Some(channel) = self.sender.sender.write().take() {
+            let _ = channel.try_send(LogFileCommand::Shutdown);
+            drop(channel);
+        }
+        if let Some(handle) = self.thread.get_mut().take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl LogFileWorker {
+    /// Creates a lazy log-file worker without spawning an OS thread until
+    /// persistence is explicitly enabled via [`Self::configure`].
+    pub(super) fn start() -> Self {
+        let file_sender = LogFileSender {
+            sender: Arc::new(RwLock::new(None)),
+            settings: Arc::new(RwLock::new(None)),
+            status: Arc::new(RwLock::new(LogPersistenceStatus::default())),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            queued_entries: Arc::default(),
+        };
+        Self {
+            sender: file_sender,
+            thread: Mutex::new(None),
+        }
+    }
+
+    fn ensure_thread_started(&self) {
+        let mut handle = self.thread.lock();
+        if handle.is_some() {
+            return;
+        }
+        let (tx, receiver) = mpsc::sync_channel(FILE_QUEUE_CAPACITY);
+        *self.sender.sender.write() = Some(tx);
+        let thread_settings = self.sender.settings.clone();
+        let thread_status = self.sender.status.clone();
+        match thread::Builder::new()
+            .name("zenclash-log-file".into())
+            .spawn(move || run_log_file_worker(receiver, thread_settings, thread_status))
+        {
+            Ok(thread) => {
+                *handle = Some(thread);
+            }
+            Err(error) => {
+                *self.sender.sender.write() = None;
+                self.sender.status.write().last_error =
+                    Some(format!("无法启动日志文件线程：{error}"));
+            }
+        }
+    }
+
+    pub(super) fn sender(&self) -> LogFileSender {
+        self.sender.clone()
+    }
+
+    pub(super) fn configure(
+        &self,
+        path: PathBuf,
+        enabled: bool,
+        max_mebibytes: u16,
+    ) -> LogPersistenceResult<()> {
+        let config = LogFileConfig::from_mebibytes(path.clone(), enabled, max_mebibytes)?;
+        *self.sender.settings.write() = Some(config.clone());
+        let mut status = self.sender.status.write();
+        status.enabled = enabled;
+        if status.path.as_ref() != Some(&path) {
+            status.size_bytes = 0;
+            status.last_error = None;
+        }
+        status.path = Some(path);
+        status.max_bytes = config.max_bytes;
+        drop(status);
+        if enabled {
+            self.ensure_thread_started();
+            if self.thread.lock().is_none() {
+                self.sender.status.write().last_error = Some("日志文件写入线程未能启动".into());
+            }
+        }
+        // A full queue already wakes the worker; periodic refresh is the fallback.
+        if let Some(channel) = self.sender.sender.read().as_ref() {
+            let _ = channel.try_send(LogFileCommand::Refresh);
+        } else {
+            refresh_file_status(&self.sender.status, &config);
+        }
+        Ok(())
+    }
+
+    pub(super) fn pending_entries(&self) -> usize {
+        self.sender.queued_entries.load(Ordering::Acquire)
+    }
+
+    pub(super) fn status(&self) -> LogPersistenceStatus {
+        self.sender.status.read().clone()
+    }
+}
+
+fn run_log_file_worker(
+    receiver: mpsc::Receiver<LogFileCommand>,
+    thread_settings: Arc<RwLock<Option<LogFileConfig>>>,
+    thread_status: Arc<RwLock<LogPersistenceStatus>>,
+) {
+    let mut writer = BoundedLogFile::default();
+    let mut observed = Instant::now();
+    loop {
+        let command = match receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(LogFileCommand::Shutdown) => break,
+            Ok(command) => Some(command),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
+        let config = thread_settings.read().clone();
+        let Some(config) = config else {
+            continue;
+        };
+        let mut refresh_requested = matches!(command, Some(LogFileCommand::Refresh));
+        let mut shutdown_requested = false;
+        if let Some(LogFileCommand::Append(first_entry, first_reservation)) = command {
+            let mut batch_entries = Vec::with_capacity(MAX_WRITE_BATCH_ENTRIES);
+            let mut batch_reservations = Vec::with_capacity(MAX_WRITE_BATCH_ENTRIES);
+            let mut batch_bytes = first_reservation.bytes;
+            batch_entries.push((*first_entry).clone());
+            batch_reservations.push(first_reservation);
+            while batch_entries.len() < MAX_WRITE_BATCH_ENTRIES
+                && batch_bytes < MAX_WRITE_BATCH_BYTES
+            {
+                match receiver.try_recv() {
+                    Ok(LogFileCommand::Append(entry, reservation)) => {
+                        batch_bytes = batch_bytes.saturating_add(reservation.bytes);
+                        batch_entries.push((*entry).clone());
+                        batch_reservations.push(reservation);
+                    }
+                    Ok(LogFileCommand::Refresh) => {
+                        refresh_requested = true;
+                    }
+                    Ok(LogFileCommand::Shutdown) | Err(TryRecvError::Disconnected) => {
+                        shutdown_requested = true;
+                        break;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                }
+            }
+            if config.enabled {
+                let result = writer.append_batch(&config, &batch_entries);
+                drop(batch_entries);
+                drop(batch_reservations);
+                let mut snapshot = thread_status.write();
+                if snapshot.path.as_ref() == Some(&config.path) {
+                    match result {
+                        Ok(size) => {
+                            snapshot.size_bytes = size;
+                            snapshot.last_error = None;
+                        }
+                        Err(error) => snapshot.last_error = Some(error.to_string()),
+                    }
+                }
+            } else {
+                drop(batch_entries);
+                drop(batch_reservations);
+            }
+        }
+        if observed.elapsed() >= Duration::from_secs(1) || refresh_requested {
+            refresh_file_status(&thread_status, &config);
+            observed = Instant::now();
+        }
+        if shutdown_requested {
+            break;
+        }
+    }
+}
+
+fn refresh_file_status(status: &RwLock<LogPersistenceStatus>, config: &LogFileConfig) {
+    let metadata = fs::metadata(&config.path);
+    let mut status = status.write();
+    if status.path.as_ref() != Some(&config.path) {
+        return;
+    }
+    match metadata {
+        Ok(metadata) => status.size_bytes = metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => status.size_bytes = 0,
+        Err(error) if status.last_error.is_none() => {
+            status.last_error = Some(format!("无法读取日志文件状态：{error}"));
+        }
+        Err(_) => {}
+    }
+}
+
+#[derive(Default)]
+struct BoundedLogFile {
+    path: Option<PathBuf>,
+    size: u64,
+    write_access: Option<crate::platform::data_coordinator::DataWriteAccess>,
+}
+
+impl BoundedLogFile {
+    #[cfg(test)]
+    fn append(&mut self, config: &LogFileConfig, entry: &LogEntry) -> LogPersistenceResult<u64> {
+        self.append_batch(config, std::slice::from_ref(entry))
+    }
+
+    fn append_batch(
+        &mut self,
+        config: &LogFileConfig,
+        entries: &[LogEntry],
+    ) -> LogPersistenceResult<u64> {
+        if entries.is_empty() {
+            return Ok(self.size);
+        }
+        if self.path.as_ref() != Some(&config.path) {
+            self.write_access = None;
+        }
+        let _write_lease = self
+            .write_access
+            .get_or_insert_with(|| {
+                crate::platform::data_coordinator::DataWriteAccess::new(&config.path)
+            })
+            .acquire()?;
+        self.synchronize_path(config)?;
+        let data = format_log_entries(entries).into_bytes();
+        let max_bytes = usize::try_from(config.max_bytes)
+            .map_err(|_| std::io::Error::other("平台无法表示日志大小上限"))?;
+        if data.len() >= max_bytes {
+            let start = data.len().saturating_sub(max_bytes);
+            let mut tail = data[start..].to_vec();
+            sanitize_utf8_tail(&mut tail);
+            drain_to_max_utf8_bytes(&mut tail, max_bytes);
+            private_io::replace(&config.path, &tail)?;
+            self.size = u64::try_from(tail.len()).unwrap_or(u64::MAX);
+            return Ok(self.size);
+        }
+        let data_bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+        if self.size.saturating_add(data_bytes) <= config.max_bytes {
+            private_io::append(&config.path, &data)?;
+            self.size = self.size.saturating_add(data_bytes);
+            return Ok(self.size);
+        }
+        self.compact_and_append(config, &data, max_bytes)
+    }
+
+    fn synchronize_path(&mut self, config: &LogFileConfig) -> LogPersistenceResult<()> {
+        if self.path.as_ref() != Some(&config.path) {
+            if let Some(parent) = config
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            self.path = Some(config.path.clone());
+        }
+        // Configuration events, another app instance, or manual maintenance
+        // may change the file without changing its path. Refresh before every
+        // append so the bounded writer and the UI never return to a stale
+        // cached counter after reporting the real metadata size.
+        self.size = fs::metadata(&config.path).map_or(0, |metadata| metadata.len());
+        Ok(())
+    }
+
+    fn compact_and_append(
+        &mut self,
+        config: &LogFileConfig,
+        data: &[u8],
+        max_bytes: usize,
+    ) -> LogPersistenceResult<u64> {
+        let retained_target = config.max_bytes.saturating_mul(COMPACTION_RETAIN_PERCENT) / 100;
+        let retained_target = usize::try_from(retained_target).unwrap_or(max_bytes);
+        let keep_bytes = retained_target.saturating_sub(data.len() + TRUNCATE_MARKER.len());
+        let tail = read_utf8_tail(&config.path, keep_bytes)?;
+        let mut rewritten = Vec::with_capacity(tail.len() + TRUNCATE_MARKER.len() + data.len());
+        rewritten.extend_from_slice(&tail);
+        rewritten.extend_from_slice(TRUNCATE_MARKER);
+        rewritten.extend_from_slice(data);
+        if rewritten.len() > max_bytes {
+            let start = rewritten.len() - max_bytes;
+            rewritten.drain(..start);
+            sanitize_utf8_tail(&mut rewritten);
+            drain_to_max_utf8_bytes(&mut rewritten, max_bytes);
+        }
+        private_io::replace(&config.path, &rewritten)?;
+        self.size = u64::try_from(rewritten.len()).unwrap_or(u64::MAX);
+        Ok(self.size)
+    }
+}
+
+fn read_utf8_tail(path: &Path, max_bytes: usize) -> LogPersistenceResult<Vec<u8>> {
+    if max_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path)?;
+    let length = file.metadata()?.len();
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    let keep = u64::try_from(max_bytes).unwrap_or(u64::MAX).min(length);
+    let sliced_mid_file = keep < length;
+    let read_len = if sliced_mid_file {
+        keep.saturating_add(1)
+    } else {
+        keep
+    };
+    let offset =
+        i64::try_from(read_len).map_err(|_| std::io::Error::other("日志尾部读取范围过大"))?;
+    file.seek(SeekFrom::End(-offset))?;
+    let mut tail = Vec::with_capacity(usize::try_from(read_len).unwrap_or_default());
+    file.read_to_end(&mut tail)?;
+    if sliced_mid_file {
+        // Check whether the byte immediately preceding the retained slice was a newline
+        // so already-aligned lines are kept intact while mid-line slices advance to the
+        // next complete line boundary.
+        let started_at_line_boundary = tail.first().copied() == Some(b'\n');
+        if !tail.is_empty() {
+            tail.drain(..1);
+        }
+        if !started_at_line_boundary
+            && let Some(newline) = tail.iter().position(|byte| *byte == b'\n')
+            && newline + 1 < tail.len()
+        {
+            tail.drain(..=newline);
+        }
+    }
+    sanitize_utf8_tail(&mut tail);
+    drain_to_max_utf8_bytes(&mut tail, max_bytes);
+    Ok(tail)
+}
+
+fn sanitize_utf8_tail(bytes: &mut Vec<u8>) {
+    let continuation_prefix = bytes
+        .iter()
+        .take(3)
+        .take_while(|byte| (**byte & 0b1100_0000) == 0b1000_0000)
+        .count();
+    if continuation_prefix > 0 {
+        bytes.drain(..continuation_prefix);
+    }
+    if std::str::from_utf8(bytes).is_err() {
+        // Replace only malformed byte sequences instead of clearing the entire log history.
+        let sanitized = String::from_utf8_lossy(bytes).into_owned().into_bytes();
+        *bytes = sanitized;
+    }
+}
+
+fn drain_to_max_utf8_bytes(bytes: &mut Vec<u8>, max_bytes: usize) {
+    if bytes.len() <= max_bytes {
+        return;
+    }
+    let mut start = bytes.len() - max_bytes;
+    while start < bytes.len() && (bytes[start] & 0b1100_0000) == 0b1000_0000 {
+        start += 1;
+    }
+    bytes.drain(..start);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn test_path(name: &str) -> PathBuf {
+        let sequence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "zenclash-log-file-{name}-{}-{sequence}.log",
+            std::process::id()
+        ))
+    }
+
+    fn entry(payload: &str, timestamp_ms: u64) -> LogEntry {
+        LogEntry {
+            level: "info".into(),
+            payload: payload.into(),
+            timestamp_ms,
+            ..LogEntry::default()
+        }
+    }
+
+    fn queue_fixture(capacity: usize) -> (LogFileSender, mpsc::Receiver<LogFileCommand>) {
+        let (sender, receiver) = mpsc::sync_channel(capacity);
+        (
+            LogFileSender {
+                sender: Arc::new(RwLock::new(Some(sender))),
+                settings: Arc::new(RwLock::new(Some(LogFileConfig::from_bytes(
+                    test_path("queue"),
+                    true,
+                    MEBIBYTE,
+                )))),
+                status: Arc::default(),
+                queued_bytes: Arc::default(),
+                queued_entries: Arc::default(),
+            },
+            receiver,
+        )
+    }
+
+    fn append_entry(sender: &LogFileSender, entry: Arc<LogEntry>) {
+        let bytes = super::super::log_entry_bytes(&entry);
+        sender.append(entry, bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_log_permission_fixture_child() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("ZENCLASH_LOG_PERMISSION_FIXTURE_CHILD").is_none() {
+            return;
+        }
+        // SAFETY: This dedicated test process has no other log/permission tests.
+        unsafe {
+            libc::umask(0o022);
+        }
+        let path = test_path("private-permissions");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 180);
+        let mut writer = BoundedLogFile::default();
+        writer.append(&config, &entry("first", 1)).unwrap();
+        let created_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        writer.append(&config, &entry("second", 2)).unwrap();
+        let appended_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        writer
+            .append(&config, &entry(&"old".repeat(30), 3))
+            .unwrap();
+        writer.append(&config, &entry("latest", 4)).unwrap();
+        let compacted_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        writer
+            .append(&config, &entry(&"long".repeat(100), 5))
+            .unwrap();
+        let replaced_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        fs::remove_file(path).unwrap();
+        assert_eq!(
+            (created_mode, appended_mode, compacted_mode, replaced_mode),
+            (0o600, 0o600, 0o600, 0o600)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_log_creation_append_and_rewrite_are_private_under_permissive_umask() {
+        let fixture = format!(
+            "{}::raw_log_permission_fixture_child",
+            module_path!().trim_start_matches("zenclash_core::")
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &fixture, "--nocapture"])
+            .env("ZENCLASH_LOG_PERMISSION_FIXTURE_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child selected no test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn pending_entries_include_inflight_and_release_on_full_and_disconnect() {
+        let (sender, receiver) = queue_fixture(1);
+        let message = Arc::new(entry("queued", 1));
+        append_entry(&sender, message.clone());
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        append_entry(&sender, message.clone());
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        let inflight = receiver.try_recv().unwrap();
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 1);
+        drop(inflight);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
+        append_entry(&sender, message.clone());
+        drop(receiver);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
+        append_entry(&sender, message);
+        assert_eq!(sender.queued_entries.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn byte_budget_rejects_before_entry_capacity_and_is_reusable_after_consumption() {
+        let (sender, receiver) = queue_fixture(FILE_QUEUE_CAPACITY);
+        let entry = Arc::new(entry(&"x".repeat(60 * 1024), 1));
+        let bytes = super::super::log_entry_bytes(&entry);
+        let admitted = FILE_QUEUE_BYTES / bytes;
+        assert!(admitted < FILE_QUEUE_CAPACITY);
+        for _ in 0..=admitted {
+            sender.append(entry.clone(), bytes);
+        }
+        assert_eq!(
+            sender.queued_bytes.load(Ordering::Acquire),
+            admitted * bytes
+        );
+        assert_eq!(sender.status.read().dropped_entries, 1);
+
+        let command = receiver.try_recv().unwrap();
+        assert_eq!(
+            sender.queued_bytes.load(Ordering::Acquire),
+            admitted * bytes
+        );
+        let LogFileCommand::Append(queued_entry, _) = &command else {
+            panic!("expected a queued log entry");
+        };
+        assert!(Arc::ptr_eq(queued_entry, &entry));
+        drop(command);
+        sender.append(entry, bytes);
+
+        let pending = receiver.try_iter().collect::<Vec<_>>();
+        assert_eq!(pending.len(), admitted);
+        assert_eq!(sender.status.read().dropped_entries, 1);
+        drop(pending);
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn dropping_the_receiver_releases_all_queued_bytes_with_a_live_sender() {
+        let (sender, receiver) = queue_fixture(FILE_QUEUE_CAPACITY);
+        append_entry(&sender, Arc::new(entry("queued", 1)));
+        assert!(sender.queued_bytes.load(Ordering::Acquire) > 0);
+
+        drop(receiver);
+
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+        append_entry(&sender, Arc::new(entry("disconnected", 2)));
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+        assert!(sender.status.read().last_error.is_some());
+    }
+
+    #[test]
+    fn a_full_entry_queue_rolls_back_the_rejected_byte_reservation() {
+        let (sender, receiver) = queue_fixture(1);
+        let entry = Arc::new(entry("small", 1));
+        let bytes = super::super::log_entry_bytes(&entry);
+        sender.append(entry.clone(), bytes);
+        sender.append(entry, bytes);
+
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), bytes);
+        assert_eq!(sender.status.read().dropped_entries, 1);
+        drop(receiver);
+        assert_eq!(sender.queued_bytes.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn compaction_keeps_the_latest_entry_below_the_limit() {
+        let path = test_path("compact");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 180);
+        let mut writer = BoundedLogFile::default();
+        writer.append(&config, &entry(&"旧".repeat(50), 1)).unwrap();
+
+        let size = writer
+            .append(&config, &entry("latest.example.com", 2))
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert!(size <= 180);
+        assert!(content.contains("latest.example.com"));
+        assert!(content.contains("Log compacted"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compaction_preserves_log_history_across_invalid_utf8_bytes() {
+        let path = test_path("invalid-utf8-compact");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 600);
+        let mut raw = Vec::new();
+        for index in 0..10 {
+            raw.extend_from_slice(
+                format!("old-line-{index:02}: padding-content-aaaa\n").as_bytes(),
+            );
+        }
+        raw.extend_from_slice(b"corrupted-line: ");
+        raw.push(0xFF);
+        raw.extend_from_slice(b" survived\n");
+        raw.extend_from_slice(b"recent-valid-line-one: keep-me\n");
+        raw.extend_from_slice(b"recent-valid-line-two: keep-me-too\n");
+        assert!(raw.len() as u64 <= 600);
+        // Push total size right up near the limit so the next append triggers compaction.
+        while (raw.len() as u64) < 580 {
+            raw.insert(0, b'x');
+        }
+        fs::write(&path, &raw).unwrap();
+
+        let mut writer = BoundedLogFile::default();
+        let size = writer
+            .append(&config, &entry("brand-new.example.com", 99))
+            .unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        assert!(size <= 600);
+        assert!(content.contains("corrupted-line: \u{FFFD} survived"));
+        assert!(content.contains("recent-valid-line-one: keep-me"));
+        assert!(content.contains("recent-valid-line-two: keep-me-too"));
+        assert!(content.contains("brand-new.example.com"));
+        assert!(content.contains("Log compacted"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn compaction_aligns_retained_tail_to_newline_boundary() {
+        let path = test_path("newline-aligned-compact");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 400);
+        let mut content = String::new();
+        for index in 0..12 {
+            content.push_str(&format!("LINE-{index:02}: abcdefghijklmnopqrstuv\n"));
+        }
+        fs::write(&path, content.as_bytes()).unwrap();
+
+        let mut writer = BoundedLogFile::default();
+        let size = writer
+            .append(&config, &entry("after-compaction", 10))
+            .unwrap();
+        let compacted = fs::read_to_string(&path).unwrap();
+        let first_line = compacted.lines().next().unwrap();
+
+        assert!(size <= 400);
+        assert!(
+            first_line.starts_with("LINE-"),
+            "compacted tail must start on a complete line boundary, got: {first_line:?}"
+        );
+        assert!(compacted.contains("after-compaction"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn disabled_configuration_does_not_create_a_file() {
+        let path = test_path("disabled");
+        let config = LogFileConfig::from_bytes(path.clone(), false, 180);
+        let mut writer = BoundedLogFile::default();
+
+        if config.enabled {
+            writer.append(&config, &entry("ignored", 1)).unwrap();
+        }
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn configuration_rejects_an_unbounded_limit() {
+        let error = LogFileConfig::from_mebibytes(test_path("invalid"), true, 0).unwrap_err();
+
+        assert!(matches!(error, LogPersistenceError::InvalidLimit));
+    }
+
+    #[test]
+    fn worker_persists_a_configured_entry_and_reports_its_size() {
+        let path = test_path("worker");
+        let worker = LogFileWorker::start();
+        worker.configure(path.clone(), true, 1).unwrap();
+
+        append_entry(&worker.sender(), Arc::new(entry("queued.example.com", 42)));
+        for _ in 0..100 {
+            if worker.status().size_bytes > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("queued.example.com")
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn append_resynchronizes_after_the_file_changes_outside_the_writer() {
+        let path = test_path("external-change");
+        let config = LogFileConfig::from_bytes(path.clone(), true, 1_024);
+        let mut writer = BoundedLogFile::default();
+        writer.append(&config, &entry("first", 1)).unwrap();
+        fs::write(&path, b"x").unwrap();
+
+        let reported = writer.append(&config, &entry("second", 2)).unwrap();
+
+        assert_eq!(reported, fs::metadata(&path).unwrap().len());
+        assert!(fs::read_to_string(&path).unwrap().contains("second"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn worker_observes_external_file_changes_without_io_in_status_reads() {
+        let path = test_path("status-metadata");
+        let worker = LogFileWorker::start();
+        worker.configure(path.clone(), true, 1).unwrap();
+        fs::write(&path, b"external").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while worker.status().size_bytes != 8 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(worker.status().size_bytes, 8);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn worker_stays_lazy_until_enabled_and_joins_cleanly_on_drop() {
+        let path = test_path("lazy-worker");
+        let worker = LogFileWorker::start();
+        assert!(worker.thread.lock().is_none());
+
+        // Disabled configuration must NOT spawn a background thread.
+        worker.configure(path.clone(), false, 1).unwrap();
+        assert!(worker.thread.lock().is_none());
+
+        // Enabling lazily spawns the writer thread, batches writes, and Drop joins cleanly.
+        worker.configure(path.clone(), true, 1).unwrap();
+        assert!(worker.thread.lock().is_some());
+        let sender = worker.sender();
+        for index in 0..10 {
+            append_entry(&sender, Arc::new(entry(&format!("batch-{index}"), index)));
+        }
+        drop(sender);
+        drop(worker);
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("batch-0"));
+        assert!(content.contains("batch-9"));
+        fs::remove_file(path).unwrap();
+    }
+}

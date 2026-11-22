@@ -1,0 +1,275 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use super::{
+    ProfileCatalog, ProfileRecord, ProfileSource, ProfileStore, ProfileStoreError,
+    ProfileStoreResult, SubscriptionMetadata, atomic_write, read_index_bytes, read_profile_bytes,
+    unique_id, unix_timestamp, validate_catalog_records, validate_clash_yaml,
+};
+
+impl ProfileStore {
+    /// Opens the platform-default profile directory, creating it when needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the user's data directory cannot be determined or
+    /// the profile directory cannot be created.
+    pub fn discover() -> ProfileStoreResult<Self> {
+        let root = crate::AppDataPaths::discover()
+            .ok_or_else(|| ProfileStoreError::InvalidYaml("无法确定用户主目录".into()))?
+            .profiles();
+        Self::new(root)
+    }
+
+    /// Opens a profile store rooted at `root`, creating its files directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be created.
+    pub fn new(root: impl Into<PathBuf>) -> ProfileStoreResult<Self> {
+        Self::open(root.into(), None)
+    }
+
+    pub(crate) fn open(
+        root: PathBuf,
+        lease: Option<&crate::platform::data_coordinator::DataWriteLease>,
+    ) -> ProfileStoreResult<Self> {
+        let access = crate::platform::data_coordinator::DataWriteAccess::for_store(
+            &root,
+            &["files", "staging"],
+        );
+        let write_access = lease.map_or(access.clone(), |lease| access.authorized(lease));
+        let store = Self {
+            transaction: crate::platform::data_coordinator::shared_transaction(&root),
+            root,
+            write_access,
+        };
+        let _write_lease = store.write_access.acquire()?;
+        fs::create_dir_all(store.files_dir())?;
+        Ok(store)
+    }
+
+    pub(crate) fn with_write_lease(
+        &self,
+        lease: &crate::platform::data_coordinator::DataWriteLease,
+    ) -> Self {
+        Self {
+            write_access: self.write_access.authorized(lease),
+            ..self.clone()
+        }
+    }
+
+    /// Returns the root directory containing the index and managed files.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Quarantines a malformed profile index while retaining managed YAML files.
+    ///
+    /// JSON decoding, record validation and defensive-size failures are recoverable. I/O
+    /// failures are returned unchanged so a permission problem is never
+    /// presented as repaired state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original non-recoverable error or an I/O error while moving
+    /// the invalid index to its timestamped backup.
+    pub fn quarantine_invalid_index(&self) -> ProfileStoreResult<Option<PathBuf>> {
+        let _write_lease = self.write_access.acquire()?;
+        let _transaction = self.transaction.lock();
+        let error = match self.load_unlocked() {
+            Ok(_) => return Ok(None),
+            Err(error) => error,
+        };
+        if !matches!(
+            error,
+            ProfileStoreError::Index(_)
+                | ProfileStoreError::InvalidIndex(_)
+                | ProfileStoreError::IndexTooLarge { .. }
+        ) {
+            return Err(error);
+        }
+        let source = self.index_path();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let quarantine = self.root.join(format!(
+            "profiles.invalid-{}-{timestamp}.json",
+            std::process::id()
+        ));
+        fs::rename(source, &quarantine)?;
+        Ok(Some(quarantine))
+    }
+
+    /// Loads and repairs the in-memory catalog view.
+    ///
+    /// Records whose managed YAML files are missing are omitted. A dangling
+    /// active profile is cleared from the returned view.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the index cannot be read or decoded.
+    pub fn load(&self) -> ProfileStoreResult<ProfileCatalog> {
+        let _transaction = self.transaction.lock();
+        self.load_unlocked()
+    }
+
+    /// Resolves the active profile to its managed YAML path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be loaded.
+    pub fn active_path(&self) -> ProfileStoreResult<Option<PathBuf>> {
+        let _transaction = self.transaction.lock();
+        let catalog = self.load_unlocked()?;
+        Ok(catalog
+            .active_profile()
+            .map(|profile| self.profile_path(profile)))
+    }
+
+    /// Imports and validates a local Clash/Mihomo YAML file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable, oversized, non-UTF-8, or invalid YAML
+    /// input, or when the managed profile cannot be persisted.
+    pub fn import_local(&self, path: impl AsRef<Path>) -> ProfileStoreResult<ProfileRecord> {
+        let path = path.as_ref();
+        let payload = String::from_utf8(read_profile_bytes(path)?).map_err(|error| {
+            ProfileStoreError::InvalidYaml(format!("本地配置内容不是 UTF-8：{error}"))
+        })?;
+        validate_clash_yaml(&payload)?;
+        let name = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("本地配置")
+            .to_string();
+        self.store_profile(
+            name,
+            ProfileSource::Local {
+                original_path: path.display().to_string(),
+            },
+            &payload,
+        )
+    }
+
+    /// Returns the managed YAML path for a profile record.
+    #[must_use]
+    pub fn profile_path(&self, profile: &ProfileRecord) -> PathBuf {
+        self.files_dir().join(&profile.file_name)
+    }
+
+    pub(crate) fn store_profile(
+        &self,
+        name: String,
+        source: ProfileSource,
+        payload: &str,
+    ) -> ProfileStoreResult<ProfileRecord> {
+        self.store_profile_with_subscription(name, source, payload, SubscriptionMetadata::default())
+    }
+
+    pub(crate) fn store_profile_with_subscription(
+        &self,
+        name: String,
+        source: ProfileSource,
+        payload: &str,
+        subscription: SubscriptionMetadata,
+    ) -> ProfileStoreResult<ProfileRecord> {
+        let _write_lease = self.write_access.acquire()?;
+        let _transaction = self.transaction.lock();
+        let mut catalog = self.load_unlocked()?;
+        let record = Self::new_profile_record(&catalog, name, source, payload.len(), subscription);
+        let path = self.profile_path(&record);
+        atomic_write(&path, payload.as_bytes())?;
+        catalog.profiles.push(record.clone());
+        if let Err(error) = self.save_unlocked(&catalog) {
+            return match fs::remove_file(&path) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(ProfileStoreError::Transaction(format!(
+                    "保存配置索引失败：{error}；清理未入库配置失败：{rollback}"
+                ))),
+            };
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn new_profile_record(
+        catalog: &super::ProfileCatalog,
+        name: String,
+        source: ProfileSource,
+        payload_size_bytes: usize,
+        subscription: SubscriptionMetadata,
+    ) -> ProfileRecord {
+        let id = unique_id(catalog, &name);
+        let file_name = format!("{id}.yaml");
+        let mut record = ProfileRecord {
+            id,
+            name,
+            file_name,
+            source,
+            updated_at: 0,
+            size_bytes: 0,
+            auto_update: false,
+            update_interval_minutes: super::DEFAULT_PROFILE_UPDATE_INTERVAL_MINUTES,
+            update_cron: None,
+            subscription: SubscriptionMetadata::default(),
+        };
+        record.apply_payload_metadata(unix_timestamp(), payload_size_bytes as u64, subscription);
+        record
+    }
+
+    pub(crate) fn load_unlocked(&self) -> ProfileStoreResult<ProfileCatalog> {
+        let path = self.index_path();
+        if !path.exists() {
+            return Ok(ProfileCatalog::default());
+        }
+        let contents = read_index_bytes(&path)?;
+        let mut catalog: ProfileCatalog = serde_json::from_slice(&contents)?;
+        validate_catalog_records(&catalog)?;
+        for profile in &catalog.profiles {
+            match fs::symlink_metadata(self.profile_path(profile)) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ProfileStoreError::InvalidIndex(zenclash_i18n::text(
+                        "profiles.errors.symlink",
+                    )));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        catalog
+            .profiles
+            .retain(|profile| self.profile_path(profile).is_file());
+        if catalog
+            .active
+            .as_ref()
+            .is_some_and(|active| !catalog.profiles.iter().any(|profile| &profile.id == active))
+        {
+            catalog.active = None;
+        }
+        Ok(catalog)
+    }
+
+    pub(crate) fn save_unlocked(&self, catalog: &ProfileCatalog) -> ProfileStoreResult<()> {
+        let bytes = super::encode_catalog(catalog)?;
+        fs::create_dir_all(&self.root)?;
+        let path = self.index_path();
+        atomic_write(&path, &bytes)?;
+        Ok(())
+    }
+
+    fn files_dir(&self) -> PathBuf {
+        self.root.join("files")
+    }
+
+    fn index_path(&self) -> PathBuf {
+        self.root.join("profiles.json")
+    }
+}

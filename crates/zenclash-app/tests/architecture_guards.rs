@@ -124,6 +124,7 @@ fn ui_components_and_actions_never_depend_on_pages_or_app_transitively() {
 fn no_runtime_store_discover_calls_outside_bootstrap() {
     let root = workspace_root();
     let allowed_bootstrap_dir = root.join("crates/zenclash-app/src/bootstrap");
+    let allowed_bootstrap_file = root.join("crates/zenclash-app/src/bootstrap.rs");
     let mut violations = Vec::new();
 
     for crate_name in ["zenclash-ui", "zenclash-app"] {
@@ -137,7 +138,7 @@ fn no_runtime_store_discover_calls_outside_bootstrap() {
             if is_test_only_file(&file, &src_dir, &excluded_paths) {
                 continue;
             }
-            if file.starts_with(&allowed_bootstrap_dir) {
+            if file == allowed_bootstrap_file || file.starts_with(&allowed_bootstrap_dir) {
                 continue;
             }
             let source = fs::read_to_string(&file)
