@@ -1,12 +1,12 @@
 // Modified for the ZenClash fork on 2026-10-05; see NOTICE.md. GPL-3.0-only.
 use crate::core::auth::{
     AuthenticatedOwner, ServiceError, authenticate_owner, hash_session_token, ipc_request_context_to_auth_context,
+    validate_request_origin_and_host,
 };
 use crate::core::desired::{
     ActiveOwnerState, clear_active_owner, commit_active_owner_session, load_active_owner, persist_owner_core_started,
     persist_owner_core_stopped, persist_owner_core_stopped_by_key, persist_owner_writer_config,
 };
-use crate::core::legacy_cleanup::cleanup_legacy_owner_files;
 use crate::core::logger::{LOG_RING, flush_writer, set_or_update_writer};
 use crate::core::manager::{CORE_IPC_READY_TIMEOUT, CORE_MANAGER, CORE_OUTPUT_DRAIN_TIMEOUT};
 use crate::core::paths::service_paths;
@@ -14,9 +14,6 @@ use crate::core::runtime_generation::{PreparedRuntime, prepare_runtime, read_run
 use crate::core::state::{set_core_lifecycle_state, set_service_lifecycle_state};
 use crate::core::status::service_status_snapshot;
 use crate::core::structure::{OwnerSessionProof, Response, ServiceLifecycleState};
-use crate::core::{
-    apply_proxy, apply_proxy_or_direct, clear_proxy, clear_proxy_waiting_for_network, validate_proxy_config,
-};
 use crate::{
     AuthenticatedRequest, AuthenticatedSessionRequest, IpcCommand, MIN_SUPPORTED_CLIENT_REVISION, MacosProxyConfig,
     OwnerSessionHandle, ProtocolInfo, ProtocolVersion, ProxyApplyOutcome, RuntimeBundle, RuntimeFileRequest,
@@ -51,29 +48,15 @@ const WINDOWS_CONTROL_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x001201
 #[cfg(all(windows, feature = "test"))]
 const WINDOWS_TEST_CONTROL_PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)";
 
-trait OwnerProxyTransition {
-    async fn clear_previous_proxy(&mut self) -> AnyResult<()>;
-    async fn compensate_direct(&mut self) -> AnyResult<()>;
+trait OwnerTransition {
     async fn stop_previous_core(&mut self) -> AnyResult<()>;
     async fn start_new_core(&mut self) -> AnyResult<()>;
     async fn commit_new_owner(&mut self) -> AnyResult<ActiveOwnerState>;
-    async fn apply_new_proxy(&mut self) -> AnyResult<crate::ProxyApplyOutcome>;
 }
 
-async fn owner_proxy_transition(
-    transition: &mut impl OwnerProxyTransition,
-) -> std::result::Result<(ActiveOwnerState, crate::ProxyApplyOutcome), ServiceError> {
-    if let Err(clear_error) = transition.clear_previous_proxy().await {
-        let compensation = transition.compensate_direct().await;
-        let message = match compensation {
-            Ok(()) => format!("Failed to clear the previous owner's proxy: {clear_error:#}"),
-            Err(compensation_error) => format!(
-                "Failed to clear the previous owner's proxy: {clear_error:#}; direct compensation failed: {compensation_error:#}"
-            ),
-        };
-        return Err(ServiceError::proxy_clear_failed(message));
-    }
-
+async fn run_owner_transition(
+    transition: &mut impl OwnerTransition,
+) -> std::result::Result<ActiveOwnerState, ServiceError> {
     if let Err(stop_error) = transition.stop_previous_core().await {
         return Err(ServiceError::owner_switch_failed(format!(
             "Failed to stop the previous owner core: {stop_error:#}"
@@ -83,15 +66,10 @@ async fn owner_proxy_transition(
         .start_new_core()
         .await
         .map_err(|error| ServiceError::owner_switch_failed(format!("Failed to start owner core: {error:#}")))?;
-    let active = transition
+    transition
         .commit_new_owner()
         .await
-        .map_err(|error| ServiceError::owner_switch_failed(format!("Failed to commit owner state: {error:#}")))?;
-    let proxy_outcome = transition
-        .apply_new_proxy()
-        .await
-        .map_err(|error| ServiceError::proxy_apply_failed(format!("Failed to apply owner proxy: {error:#}")))?;
-    Ok((active, proxy_outcome))
+        .map_err(|error| ServiceError::owner_switch_failed(format!("Failed to commit owner state: {error:#}")))
 }
 
 /// When a handler's stop must reach SIGKILL so `reserve` still fits before the handler timeout.
@@ -105,24 +83,9 @@ struct StartOwnerTransition<'a> {
     owner: &'a AuthenticatedOwner,
     prepared_runtime: Option<PreparedRuntime>,
     proposed_session_token: &'a str,
-    macos_proxy: Option<&'a MacosProxyConfig>,
 }
 
-impl OwnerProxyTransition for StartOwnerTransition<'_> {
-    async fn clear_previous_proxy(&mut self) -> AnyResult<()> {
-        // A recorded owner may not have stopped cleanly, so its proxy is worth waiting for.
-        // Without one, clear at once as before rather than delay every offline or VPN start.
-        if self.previous_owner.is_some() {
-            clear_previous_owner_proxy().await
-        } else {
-            clear_service_proxy().await
-        }
-    }
-
-    async fn compensate_direct(&mut self) -> AnyResult<()> {
-        compensate_service_proxy().await
-    }
-
+impl OwnerTransition for StartOwnerTransition<'_> {
     async fn stop_previous_core(&mut self) -> AnyResult<()> {
         let kill_by = sigkill_deadline(self.handler_deadline, TAKEOVER_RESERVE);
         CORE_MANAGER.lock().await.stop_core_by(kill_by).await?;
@@ -186,10 +149,6 @@ impl OwnerProxyTransition for StartOwnerTransition<'_> {
             Err(error) => self.rollback_commit_failure(error).await,
         }
     }
-
-    async fn apply_new_proxy(&mut self) -> AnyResult<ProxyApplyOutcome> {
-        apply_service_proxy_or_direct(self.macos_proxy).await
-    }
 }
 
 impl StartOwnerTransition<'_> {
@@ -203,63 +162,6 @@ impl StartOwnerTransition<'_> {
         self.prepared_runtime.take();
         Err(error)
     }
-}
-
-/// Whether proxy routes affect real system settings in this build.
-const SERVICE_PROXY_IS_LIVE: bool = cfg!(all(target_os = "macos", not(feature = "test")));
-
-async fn clear_service_proxy() -> AnyResult<()> {
-    if SERVICE_PROXY_IS_LIVE {
-        clear_proxy().await
-    } else {
-        Ok(())
-    }
-}
-
-/// Only the takeover waits for a network service; stopping keeps the immediate [`clear_proxy`].
-async fn clear_previous_owner_proxy() -> AnyResult<()> {
-    if SERVICE_PROXY_IS_LIVE {
-        clear_proxy_waiting_for_network().await
-    } else {
-        Ok(())
-    }
-}
-
-async fn compensate_service_proxy() -> AnyResult<()> {
-    if SERVICE_PROXY_IS_LIVE {
-        apply_proxy(&MacosProxyConfig::Disabled).await
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(feature = "test"))]
-async fn apply_service_proxy_or_direct(config: Option<&MacosProxyConfig>) -> AnyResult<ProxyApplyOutcome> {
-    apply_proxy_or_direct(config).await
-}
-
-#[cfg(feature = "test")]
-async fn apply_service_proxy_or_direct(config: Option<&MacosProxyConfig>) -> AnyResult<ProxyApplyOutcome> {
-    let _ = apply_proxy_or_direct;
-    Ok(if config.is_some() {
-        ProxyApplyOutcome::Applied
-    } else {
-        ProxyApplyOutcome::NotRequested
-    })
-}
-
-async fn clear_proxy_with_direct_compensation() -> std::result::Result<(), ServiceError> {
-    let Err(clear_error) = clear_service_proxy().await else {
-        return Ok(());
-    };
-    let compensation = compensate_service_proxy().await;
-    let message = match compensation {
-        Ok(()) => format!("Failed to clear the active owner's proxy: {clear_error:#}"),
-        Err(compensation_error) => format!(
-            "Failed to clear the active owner's proxy: {clear_error:#}; direct compensation failed: {compensation_error:#}"
-        ),
-    };
-    Err(ServiceError::proxy_clear_failed(message))
 }
 
 async fn rollback_started_owner(owner: &AuthenticatedOwner, handler_deadline: Instant) -> AnyResult<()> {
@@ -370,11 +272,8 @@ async fn retire_expired_owner() -> AnyResult<()> {
         generation = active.generation,
         "GUI ownership expired; stopping its core"
     );
-    let proxy_result = clear_proxy_with_direct_compensation().await;
-    // Even failed proxy restoration must not leave a dead GUI's TUN and listeners running.
     CORE_MANAGER.lock().await.stop_core().await?;
     persist_owner_core_stopped_by_key(&active.owner_key).await?;
-    proxy_result?;
     clear_active_owner().await?;
     super::owner_lease::reset(None);
     Ok(())
@@ -727,7 +626,7 @@ impl<T> OwnerRequestEnvelope for AuthenticatedSessionRequest<T> {
     }
 }
 
-/// Validates protocol, parses the envelope, then authenticates its owner.
+/// Validates Host/Origin, protocol version, parses the envelope, then authenticates its owner.
 /// Lifecycle locking remains separate so `StartClash` can validate before waiting on the lock.
 fn authenticate_request<E>(
     ctx: &kode_bridge::RequestContext,
@@ -735,6 +634,9 @@ fn authenticate_request<E>(
 where
     E: DeserializeOwned + OwnerRequestEnvelope,
 {
+    if let Err(error) = validate_request_origin_and_host(&ctx.headers) {
+        return ControlFlow::Break(service_error(error));
+    }
     if let Err(error) = require_protocol_version(ctx) {
         return ControlFlow::Break(service_error(error));
     }
@@ -857,10 +759,10 @@ fn create_ipc_router() -> Result<Router> {
             if hash_session_token(&start_request.proposed_session_token).is_err() {
                 return bad_request("Invalid proposed owner session token");
             }
-            if let Some(proxy) = start_request.macos_proxy.as_ref()
-                && let Err(error) = validate_proxy_config(proxy)
-            {
-                return service_error(ServiceError::invalid_proxy_config(error.to_string()));
+            if start_request.macos_proxy.is_some() {
+                return service_error(ServiceError::invalid_proxy_config(
+                    "system proxy is managed by zenclash-core, not zenclash-service",
+                ));
             }
             let _lifecycle_guard = match enter_owner_lifecycle(&owner, OwnerLifecycleGate::Unchecked).await {
                 ControlFlow::Continue(guard) => guard,
@@ -882,21 +784,17 @@ fn create_ipc_router() -> Result<Router> {
                 owner: &owner,
                 prepared_runtime: Some(prepared_runtime),
                 proposed_session_token: &start_request.proposed_session_token,
-                macos_proxy: start_request.macos_proxy.as_ref(),
             };
-            let (active, proxy_outcome) = match owner_proxy_transition(&mut transition).await {
-                Ok(result) => result,
+            let active = match run_owner_transition(&mut transition).await {
+                Ok(active) => active,
                 Err(error) => return service_error(error),
             };
-            if let Err(error) = cleanup_legacy_owner_files(&owner).await {
-                warn!("Core start committed, but legacy owner cleanup will be retried later: {error}");
-            }
             info!("Core started successfully");
             ok_json(StartClashResult {
                 session: OwnerSessionHandle {
                     generation: active.generation,
                 },
-                proxy_outcome,
+                proxy_outcome: ProxyApplyOutcome::NotRequested,
             })
         })
         .post(IpcCommand::Heartbeat.as_ref(), |ctx| async move {
@@ -940,6 +838,7 @@ fn create_ipc_router() -> Result<Router> {
                 Ok(paths) => paths,
                 Err(error) => return service_unavailable(format!("Failed to locate service data: {error}")),
             };
+            flush_writer();
             let path = paths.for_owner(&owner.identity).logs_dir().join("service_latest.log");
             match read_log_snapshot(&path).await {
                 Ok(snapshot) => ok_json(snapshot),
@@ -958,9 +857,6 @@ fn create_ipc_router() -> Result<Router> {
                     ControlFlow::Continue(guard) => guard,
                     ControlFlow::Break(response) => return response,
                 };
-            if let Err(error) = clear_proxy_with_direct_compensation().await {
-                return service_error(error);
-            }
             let kill_by = sigkill_deadline(handler_deadline, STOP_RESERVE);
             match CORE_MANAGER.lock().await.stop_core_by(kill_by).await {
                 Ok(_) => info!("Core stopped successfully"),
@@ -1071,19 +967,15 @@ fn create_ipc_router() -> Result<Router> {
                 ControlFlow::Continue(authenticated) => authenticated,
                 ControlFlow::Break(response) => return response,
             };
-            // Reject a stale session before reporting payload validation errors.
+            // Reject a stale session before reporting removal of service-side proxy control.
             let _lifecycle_guard =
                 match enter_owner_lifecycle(&owner, OwnerLifecycleGate::ActiveSession(&request.session)).await {
                     ControlFlow::Continue(guard) => guard,
                     ControlFlow::Break(response) => return response,
                 };
-            if let Err(error) = validate_proxy_config(&request.payload) {
-                return service_error(ServiceError::invalid_proxy_config(error.to_string()));
-            }
-            match apply_service_proxy_or_direct(Some(&request.payload)).await {
-                Ok(outcome) => ok_json(outcome),
-                Err(error) => service_error(ServiceError::proxy_apply_failed(error.to_string())),
-            }
+            service_error(ServiceError::invalid_proxy_config(
+                "system proxy is managed by zenclash-core, not zenclash-service",
+            ))
         });
     Ok(router)
 }
@@ -1134,7 +1026,8 @@ fn service_error(error: ServiceError) -> Result<HttpResponse> {
         crate::ServiceErrorCode::UnauthorizedOwner | crate::ServiceErrorCode::AppDataRootNotOwned => {
             StatusCode::UNAUTHORIZED
         }
-        crate::ServiceErrorCode::NotActive => StatusCode::CONFLICT,
+        crate::ServiceErrorCode::ForbiddenOrigin => StatusCode::FORBIDDEN,
+        crate::ServiceErrorCode::NotActive | crate::ServiceErrorCode::SessionConflict => StatusCode::CONFLICT,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     };
     json_response::<()>(status, error.code as u16, error.message, None)
@@ -1199,15 +1092,16 @@ static OWNER_LIFECYCLE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 #[cfg(test)]
 mod owner_lifecycle_tests {
     use super::{
-        OwnerProxyTransition, WINDOWS_CONTROL_PIPE_SDDL, owner_proxy_transition, require_active_owner,
-        require_active_session,
+        OwnerTransition, WINDOWS_CONTROL_PIPE_SDDL, require_active_owner, require_active_session, run_owner_transition,
+        service_error,
     };
     use crate::ServiceErrorCode;
-    use crate::core::auth::AuthenticatedOwner;
+    use crate::core::auth::{AuthenticatedOwner, ServiceError};
     use crate::core::desired::{
         ActiveOwnerState, clear_active_owner, commit_active_owner_session, persist_active_owner,
     };
-    use crate::{OwnerIdentity, OwnerSessionProof, ProxyApplyOutcome};
+    use crate::{OwnerIdentity, OwnerSessionProof};
+    use http::StatusCode;
     use serial_test::serial;
 
     fn owner(uid: u32) -> AuthenticatedOwner {
@@ -1245,25 +1139,10 @@ mod owner_lifecycle_tests {
         active_owner: ActiveOwnerState,
         running_pid: u32,
         next_owner: ActiveOwnerState,
-        clear_fails: bool,
         stop_fails: bool,
-        apply_falls_back: bool,
     }
 
-    impl OwnerProxyTransition for RecordingTransition {
-        async fn clear_previous_proxy(&mut self) -> anyhow::Result<()> {
-            self.events.push("clear_proxy");
-            if self.clear_fails {
-                anyhow::bail!("clear failed");
-            }
-            Ok(())
-        }
-
-        async fn compensate_direct(&mut self) -> anyhow::Result<()> {
-            self.events.push("compensate_direct");
-            Ok(())
-        }
-
+    impl OwnerTransition for RecordingTransition {
         async fn stop_previous_core(&mut self) -> anyhow::Result<()> {
             self.events.push("stop_a");
             if self.stop_fails {
@@ -1284,17 +1163,6 @@ mod owner_lifecycle_tests {
             self.active_owner = self.next_owner.clone();
             Ok(self.active_owner.clone())
         }
-
-        async fn apply_new_proxy(&mut self) -> anyhow::Result<ProxyApplyOutcome> {
-            self.events.push("apply_b");
-            if self.apply_falls_back {
-                self.events.push("compensate_direct");
-                return Ok(ProxyApplyOutcome::DirectFallback {
-                    message: "apply failed".to_owned(),
-                });
-            }
-            Ok(ProxyApplyOutcome::Applied)
-        }
     }
 
     fn recording_transition() -> RecordingTransition {
@@ -1303,74 +1171,45 @@ mod owner_lifecycle_tests {
             active_owner: ActiveOwnerState::from(&owner(96_001)),
             running_pid: 101,
             next_owner: ActiveOwnerState::from(&owner(96_002)),
-            clear_fails: false,
             stop_fails: false,
-            apply_falls_back: false,
         }
     }
 
     #[tokio::test]
-    async fn owner_proxy_transition_successful_takeover_has_exact_order() -> anyhow::Result<()> {
+    async fn owner_transition_successful_takeover_has_exact_order() -> anyhow::Result<()> {
         let mut transition = recording_transition();
 
-        let (_, outcome) = owner_proxy_transition(&mut transition).await?;
+        let active = run_owner_transition(&mut transition).await?;
 
-        assert_eq!(
-            transition.events,
-            ["clear_proxy", "stop_a", "start_b", "commit_b", "apply_b"]
-        );
+        assert_eq!(transition.events, ["stop_a", "start_b", "commit_b"]);
+        assert_eq!(active.owner_key, "96002");
         assert_eq!(transition.active_owner.owner_key, "96002");
         assert_eq!(transition.running_pid, 202);
-        assert_eq!(outcome, ProxyApplyOutcome::Applied);
         Ok(())
     }
 
     #[tokio::test]
-    async fn owner_proxy_transition_clear_failure_preserves_old_owner_and_core() {
-        let mut transition = recording_transition();
-        transition.clear_fails = true;
-
-        let error = owner_proxy_transition(&mut transition)
-            .await
-            .expect_err("proxy clear failure must abort takeover");
-
-        assert_eq!(error.code, ServiceErrorCode::ProxyClearFailed);
-        assert_eq!(transition.events, ["clear_proxy", "compensate_direct"]);
-        assert_eq!(transition.active_owner.owner_key, "96001");
-        assert_eq!(transition.running_pid, 101);
-    }
-
-    #[tokio::test]
-    async fn owner_proxy_transition_stop_failure_preserves_old_owner() {
+    async fn owner_transition_stop_failure_preserves_old_owner() {
         let mut transition = recording_transition();
         transition.stop_fails = true;
 
-        let error = owner_proxy_transition(&mut transition)
+        let error = run_owner_transition(&mut transition)
             .await
             .expect_err("core stop failure must abort takeover");
 
         assert_eq!(error.code, ServiceErrorCode::OwnerSwitchFailed);
-        assert_eq!(transition.events, ["clear_proxy", "stop_a"]);
+        assert_eq!(transition.events, ["stop_a"]);
         assert_eq!(transition.active_owner.owner_key, "96001");
         assert_eq!(transition.running_pid, 101);
     }
 
-    #[tokio::test]
-    async fn owner_proxy_transition_apply_failure_keeps_new_owner_and_core() -> anyhow::Result<()> {
-        let mut transition = recording_transition();
-        transition.apply_falls_back = true;
+    #[test]
+    fn service_error_maps_forbidden_origin_and_session_conflict_http_statuses() -> anyhow::Result<()> {
+        let forbidden = service_error(ServiceError::forbidden_origin("origin blocked"))?;
+        assert_eq!(forbidden.status, StatusCode::FORBIDDEN);
 
-        let (active, outcome) = owner_proxy_transition(&mut transition).await?;
-
-        assert_eq!(active.owner_key, "96002");
-        assert_eq!(transition.active_owner.owner_key, "96002");
-        assert_eq!(transition.running_pid, 202);
-        assert_eq!(
-            outcome,
-            ProxyApplyOutcome::DirectFallback {
-                message: "apply failed".to_owned(),
-            }
-        );
+        let conflict = service_error(ServiceError::session_conflict("session mismatch"))?;
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
         Ok(())
     }
 

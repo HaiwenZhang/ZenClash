@@ -49,3 +49,20 @@ fn service_version_query_exits_without_starting_a_daemon() -> std::io::Result<()
     );
     Ok(())
 }
+
+#[test]
+fn unified_service_binary_dispatches_install_subcommand() -> std::io::Result<()> {
+    let unknown = std::process::Command::new(env!("CARGO_BIN_EXE_zenclash-service"))
+        .args(["install", "--unknown-option"])
+        .output()?;
+    let stderr = String::from_utf8_lossy(&unknown.stderr);
+    assert_eq!(unknown.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("unknown installer argument"), "{stderr}");
+
+    let prepare = std::process::Command::new(env!("CARGO_BIN_EXE_zenclash-service"))
+        .args(["install", "--prepare-install", "--ensure"])
+        .output()?;
+    assert!(!prepare.status.success());
+    assert!(String::from_utf8_lossy(&prepare.stderr).contains("no core executable"));
+    Ok(())
+}

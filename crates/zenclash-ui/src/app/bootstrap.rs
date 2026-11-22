@@ -2,8 +2,9 @@ use gpui_kit::{Menu, MenuItem};
 
 use super::{
     App, AppContext, AppPreferences, AppPreferencesStore, AppServices, AppearancePreference,
-    KeyBinding, LogMonitor, NetworkTrayIcon, Quit, SharedString, ShowStatusMenu, ThemeMode,
-    TitleBar, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme, px,
+    BootstrappedApplication, KeyBinding, LogMonitor, NetworkTrayIcon, Quit, SharedString,
+    ShowStatusMenu, ThemeMode, TitleBar, WindowBounds, WindowOptions, ZenClashApp, apply_zen_theme,
+    px,
 };
 
 /// Restores the retained primary window when the running application is reopened.
@@ -107,14 +108,6 @@ pub fn create_main_window_with_service_startup(
     cx: &mut App,
 ) {
     open_main_window(services, initialization, None, cx);
-}
-
-/// Services and the verified startup receipt published by background bootstrap.
-pub struct BootstrappedApplication {
-    /// Initialized application services.
-    pub services: AppServices,
-    /// Initialization receipt consumed before profile commands can begin.
-    pub initialization: Option<zenclash_core::CoreInitializationOutcome>,
 }
 
 type StartupTask = tokio::task::JoinHandle<Result<BootstrappedApplication, String>>;

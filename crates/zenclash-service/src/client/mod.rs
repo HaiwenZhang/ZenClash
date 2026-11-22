@@ -3,9 +3,9 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use kode_bridge::{ClientConfig, IpcHttpClient};
-use log::{debug, warn};
 use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 #[cfg(all(windows, any(not(feature = "test"), test)))]
 pub(crate) mod windows_identity;

@@ -96,8 +96,13 @@ fn failed_profile_store_does_not_hide_the_application_data_directory_child() {
         MihomoClient::new(MihomoEndpoint::default()).unwrap(),
     )
     .unwrap();
-    let (catalog, directories) =
-        load_profile_catalog_and_directories(None, &session.runtime_descriptor());
+    let profile_store = zenclash_core::ProfileStore::new(paths.profiles()).ok();
+    let (catalog, directories) = load_profile_catalog_and_directories(
+        profile_store.as_ref(),
+        Some(paths.root()),
+        None,
+        &session.runtime_descriptor(),
+    );
     assert!(catalog.is_err());
     assert!(directories.contains(&(
         zenclash_i18n::text("app.directories.data"),

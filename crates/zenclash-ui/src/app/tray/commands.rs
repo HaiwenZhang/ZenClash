@@ -276,13 +276,12 @@ impl ZenClashApp {
     fn start_profile_selection(&mut self, id: String, cx: &mut Context<Self>) {
         self.tray_command_error = None;
         cx.notify();
+        let profile_store = self.profile_store.clone();
         let controlled = self.controlled_config_store.clone();
         let application_commands = self.application_commands.clone();
         let task = self.runtime.spawn(async move {
-            let store = tokio::task::spawn_blocking(zenclash_core::ProfileStore::discover)
-                .await
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
+            let store = profile_store
+                .ok_or_else(|| zenclash_i18n::text("profiles.errors.store_unavailable"))?;
             application_commands
                 .activate(store, controlled, id)
                 .await

@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use gpui_kit::Context;
-use zenclash_core::ProfileStore;
 
 use super::ZenClashApp;
 
@@ -9,13 +8,16 @@ const PROFILE_UPDATE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
 impl ZenClashApp {
     pub(super) fn start_profile_updates(&mut self, cx: &mut Context<Self>) {
+        let Some(profile_store) = self.profile_store.clone() else {
+            return;
+        };
         let runtime = self.runtime.clone();
         let controlled = self.controlled_config_store.clone();
         let application_commands = self.application_commands.clone();
         cx.spawn(async move |this, cx| {
             loop {
-                let scan = runtime.spawn_blocking(|| {
-                    let store = ProfileStore::discover().map_err(|error| error.to_string())?;
+                let store = profile_store.clone();
+                let scan = runtime.spawn_blocking(move || {
                     let catalog = store.load().map_err(|error| error.to_string())?;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

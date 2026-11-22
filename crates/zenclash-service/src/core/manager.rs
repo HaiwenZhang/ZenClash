@@ -72,9 +72,63 @@ impl CoreExitInfo {
     }
 }
 
+#[cfg(windows)]
+struct ChildJobObject {
+    _handle: std::os::windows::io::OwnedHandle,
+}
+
+#[cfg(windows)]
+impl ChildJobObject {
+    fn assign_child(child: &Child) -> Result<Self> {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        };
+
+        let process_handle = child
+            .raw_handle()
+            .context("spawned Windows core process handle is unavailable")?;
+        // SAFETY: Both arguments are null, requesting an anonymous Job Object with default security;
+        // the returned handle is checked for null before adoption.
+        let raw_job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw_job.is_null() {
+            return Err(std::io::Error::last_os_error()).context("failed to create Windows Job Object for core");
+        }
+        // SAFETY: `raw_job` is non-null and exclusively owned by this guard.
+        let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `job` is a live Job Object handle and `limits` is initialized storage matching the size passed.
+        let configured = unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to configure JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE on Windows Job Object");
+        }
+
+        // SAFETY: Both `job` and `process_handle` are valid live OS handles for this synchronous call.
+        let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle(), process_handle) };
+        if assigned == 0 {
+            return Err(std::io::Error::last_os_error()).context("failed to assign Windows core process to Job Object");
+        }
+
+        Ok(Self { _handle: job })
+    }
+}
+
 pub struct ChildGuard {
     child: Option<Child>,
     readers: Vec<JoinHandle<()>>,
+    #[cfg(windows)]
+    job: Option<ChildJobObject>,
 }
 
 impl ChildGuard {
@@ -121,6 +175,10 @@ impl ChildGuard {
         }
         result?;
         self.child.take();
+        #[cfg(windows)]
+        {
+            self.job.take();
+        }
         self.drain_output().await;
         info!("Core ({:?}) stopped", child_id);
         Ok(())
@@ -808,16 +866,24 @@ pub async fn run_with_logging(
     set_or_update_writer(writer_config)?;
 
     #[cfg(windows)]
-    let child = {
+    let (child, job) = {
         let OwnerIdentity::Windows { sid } = owner else {
             return Err(anyhow!("Windows core requires a Windows owner identity"));
         };
-        Command::new(bin_path)
+        let mut child = Command::new(bin_path)
             .args(args)
             .env("LISTEN_NAMEDPIPE_SDDL", windows_owner_pipe_sddl(sid))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?
+            .spawn()?;
+        let job = match ChildJobObject::assign_child(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill().await;
+                return Err(error);
+            }
+        };
+        (child, Some(job))
     };
 
     // SAFETY: `pre_exec` runs only `umask`, which is async-signal-safe and
@@ -839,6 +905,8 @@ pub async fn run_with_logging(
     let mut child_guard = ChildGuard {
         child: Some(child),
         readers: Vec::new(),
+        #[cfg(windows)]
+        job,
     };
 
     let (Some(stdout), Some(stderr)) = (
@@ -848,13 +916,17 @@ pub async fn run_with_logging(
         return Err(anyhow!("Failed to capture child output"));
     };
 
-    child_guard.readers.push(spawn_line_reader(stdout, log::Level::Info));
-    child_guard.readers.push(spawn_line_reader(stderr, log::Level::Error));
+    child_guard
+        .readers
+        .push(spawn_line_reader(stdout, tracing::Level::INFO));
+    child_guard
+        .readers
+        .push(spawn_line_reader(stderr, tracing::Level::ERROR));
 
     Ok(child_guard)
 }
 
-fn spawn_line_reader<R>(reader: R, level: log::Level) -> JoinHandle<()>
+fn spawn_line_reader<R>(reader: R, level: tracing::Level) -> JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {

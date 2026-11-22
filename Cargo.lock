@@ -857,15 +857,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
-name = "castaway"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1068,19 +1059,6 @@ checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
-]
-
-[[package]]
-name = "compact_str"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "static_assertions",
- "zmij",
 ]
 
 [[package]]
@@ -1691,7 +1669,7 @@ dependencies = [
  "rustc_version",
  "toml 1.1.6+spec-1.1.0",
  "vswhom",
- "winreg 0.56.0",
+ "winreg",
 ]
 
 [[package]]
@@ -1932,19 +1910,6 @@ dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
  "zlib-rs",
-]
-
-[[package]]
-name = "flexi_logger"
-version = "0.31.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4945fa9cdfd7571192cf559c186d45ab36c8034482a2d217a19bdc566f190cc"
-dependencies = [
- "chrono",
- "log",
- "nu-ansi-term",
- "regex",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7653,36 +7618,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "sysproxy"
-version = "0.7.1"
-source = "git+https://github.com/clash-verge-rev/sysproxy-rs.git?rev=c37a60e1fc9079cc0f074200e2296afd1705208c#c37a60e1fc9079cc0f074200e2296afd1705208c"
-dependencies = [
- "log",
- "system-configuration 0.7.0",
- "thiserror 2.0.21",
- "url",
- "which 8.0.6",
- "windows 0.62.2",
- "winreg 0.55.0",
- "xdg",
-]
-
-[[package]]
 name = "system-configuration"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c879d448e9d986b661742763247d3693ed13609438cf3d006f51f5368a5ba6b"
-dependencies = [
- "bitflags 2.13.2",
- "core-foundation 0.9.4",
- "system-configuration-sys",
-]
-
-[[package]]
-name = "system-configuration"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.9.4",
@@ -8242,21 +8181,6 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
-]
-
-[[package]]
-name = "tracing-estuary"
-version = "0.1.0"
-source = "git+https://github.com/Tunglies/tracing-estuary.git?rev=dbfce033fa4cff8f936f3e7c2282af1277546f3c#dbfce033fa4cff8f936f3e7c2282af1277546f3c"
-dependencies = [
- "anyhow",
- "compact_str",
- "flexi_logger",
- "log",
- "parking_lot 0.12.5",
- "tracing",
- "tracing-log",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -9833,16 +9757,6 @@ dependencies = [
 
 [[package]]
 name = "winreg"
-version = "0.55.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
-dependencies = [
- "cfg-if",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "winreg"
 version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
@@ -9919,12 +9833,6 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
-
-[[package]]
-name = "xdg"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
 
 [[package]]
 name = "xim-ctext"
@@ -10199,6 +10107,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenclash-app"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "parking_lot 0.13.0",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "zenclash-core",
+ "zenclash-i18n",
+]
+
+[[package]]
 name = "zenclash-core"
 version = "0.3.0"
 dependencies = [
@@ -10256,11 +10178,9 @@ version = "2.7.5+zenclash.2"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
- "flexi_logger",
  "http",
  "kode-bridge",
  "libc",
- "log",
  "nix",
  "once_cell",
  "parking_lot 0.13.0",
@@ -10271,13 +10191,10 @@ dependencies = [
  "sha2 0.11.1",
  "strum",
  "strum_macros",
- "sysproxy",
  "system-configuration 0.8.0",
  "tokio",
  "tracing",
- "tracing-estuary",
  "tracing-subscriber",
- "url",
  "windows-service",
  "windows-sys 0.61.2",
 ]
@@ -10302,6 +10219,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "windows-sys 0.61.2",
+ "zenclash-app",
  "zenclash-core",
  "zenclash-i18n",
 ]

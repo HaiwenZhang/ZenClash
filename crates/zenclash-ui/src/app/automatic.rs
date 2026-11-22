@@ -4,78 +4,13 @@ use std::{
 };
 
 use gpui_kit::Context;
+use zenclash_app::automatic::{
+    EdgeStableObservation, PendingSourceRevision, SourceRevisionKey, SourceScanner,
+    StableObservation,
+};
 use zenclash_core::NetworkReachability;
 
 use super::{ZenClashApp, system_proxy::QuitState};
-
-const INITIAL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
-const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
-
-#[derive(Default)]
-struct StableObservation<T> {
-    candidate: Option<T>,
-}
-
-impl<T: PartialEq> StableObservation<T> {
-    fn observe(&mut self, value: T) -> bool {
-        let stable = self.candidate.as_ref() == Some(&value);
-        self.candidate = Some(value);
-        stable
-    }
-}
-
-#[derive(Debug)]
-struct EdgeStableObservation<T> {
-    candidate: Option<T>,
-    committed: Option<T>,
-    retry_after: Option<Instant>,
-    retry_backoff: Duration,
-}
-
-impl<T> Default for EdgeStableObservation<T> {
-    fn default() -> Self {
-        Self {
-            candidate: None,
-            committed: None,
-            retry_after: None,
-            retry_backoff: INITIAL_RETRY_BACKOFF,
-        }
-    }
-}
-
-impl<T: PartialEq> EdgeStableObservation<T> {
-    fn observe(&mut self, value: T, now: Instant) -> bool {
-        if self.candidate.as_ref() != Some(&value) {
-            self.candidate = Some(value);
-            self.retry_after = None;
-            self.retry_backoff = INITIAL_RETRY_BACKOFF;
-            return false;
-        }
-        if self.committed.as_ref() == Some(&value) {
-            return false;
-        }
-        if let Some(deadline) = self.retry_after
-            && now < deadline
-        {
-            return false;
-        }
-        true
-    }
-
-    fn mark_committed(&mut self, value: T) {
-        self.committed = Some(value);
-        self.retry_after = None;
-        self.retry_backoff = INITIAL_RETRY_BACKOFF;
-    }
-
-    fn record_failure(&mut self, now: Instant) {
-        self.retry_after = Some(now + self.retry_backoff);
-        self.retry_backoff = (self.retry_backoff * 2).min(MAX_RETRY_BACKOFF);
-    }
-}
-
-mod source_scanner;
-use source_scanner::{PendingSourceRevision, SourceRevisionKey, SourceScanner};
 
 impl ZenClashApp {
     pub(super) fn start_service_handoff(&self, cx: &mut Context<Self>) {
@@ -98,8 +33,8 @@ impl ZenClashApp {
         let generation = core.generation();
         let revision = capture.intent_revision();
         cx.spawn(async move |this, cx| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(120);
-            while std::time::Instant::now() < deadline {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline {
                 if core.is_shutting_down()
                     || core.generation() != generation
                     || capture.intent_revision() != revision
@@ -156,7 +91,9 @@ impl ZenClashApp {
         let core = self.core_session.clone();
         let capture = self.traffic_capture.clone();
         let controlled = self.controlled_config_store.clone();
-        let scanner = std::sync::Arc::new(parking_lot::Mutex::new(SourceScanner::default()));
+        let scanner = std::sync::Arc::new(parking_lot::Mutex::new(SourceScanner::new(
+            self.override_store.clone(),
+        )));
         cx.spawn(async move |this, cx| {
             let mut network = EdgeStableObservation::default();
             let mut source = StableObservation::<Option<SourceRevisionKey>>::default();
@@ -167,7 +104,10 @@ impl ZenClashApp {
                     return;
                 }
                 let Ok((quitting, profile)) = this.update(cx, |this, _| {
-                    (this.quit_state == QuitState::InProgress, this.profile_path.clone())
+                    (
+                        this.quit_state == QuitState::InProgress,
+                        this.profile_path.clone(),
+                    )
                 }) else {
                     return;
                 };
@@ -180,11 +120,13 @@ impl ZenClashApp {
                 let store = controlled.clone();
                 let inspected_profile = profile.clone();
                 let scanner = scanner.clone();
-                let scan = runtime.spawn_blocking(move || {
-                    let network = NetworkReachability::detect();
-                    let configuration = scanner.lock().scan(&store, kind, inspected_profile);
-                    (network, configuration)
-                }).await;
+                let scan = runtime
+                    .spawn_blocking(move || {
+                        let network = NetworkReachability::detect();
+                        let configuration = scanner.lock().scan(&store, kind, inspected_profile);
+                        (network, configuration)
+                    })
+                    .await;
                 let mut notice = None;
                 let mut error = None;
                 match scan {
@@ -195,13 +137,21 @@ impl ZenClashApp {
                         {
                             let task_core = core.clone();
                             let task_capture = capture.clone();
-                            let action = runtime.spawn(async move {
-                                match reachability {
-                                    NetworkReachability::Offline => Some((task_core.suspend_for_network(&task_capture).await, "automatic.network_stopped")),
-                                    NetworkReachability::Online => Some((task_core.resume_after_network(&task_capture).await, "automatic.network_resumed")),
-                                    NetworkReachability::Unknown => None,
-                                }
-                            }).await;
+                            let action = runtime
+                                .spawn(async move {
+                                    match reachability {
+                                        NetworkReachability::Offline => Some((
+                                            task_core.suspend_for_network(&task_capture).await,
+                                            "automatic.network_stopped",
+                                        )),
+                                        NetworkReachability::Online => Some((
+                                            task_core.resume_after_network(&task_capture).await,
+                                            "automatic.network_resumed",
+                                        )),
+                                        NetworkReachability::Unknown => None,
+                                    }
+                                })
+                                .await;
                             match action {
                                 Ok(Some((Ok(true), key))) => {
                                     network.mark_committed(reachability);
@@ -222,23 +172,57 @@ impl ZenClashApp {
                             }
                         }
                         match configuration {
-                            Ok(Some(PendingSourceRevision { source_profile, override_paths, digest })) => {
-                                let identity = SourceRevisionKey { source_profile: source_profile.clone(), digest };
-                                if source.observe(Some(identity.clone())) && rejected_source.as_ref() != Some(&identity) && reachability != NetworkReachability::Offline {
+                            Ok(Some(PendingSourceRevision {
+                                source_profile,
+                                override_paths,
+                                digest,
+                            })) => {
+                                let identity = SourceRevisionKey {
+                                    source_profile: source_profile.clone(),
+                                    digest,
+                                };
+                                if source.observe(Some(identity.clone()))
+                                    && rejected_source.as_ref() != Some(&identity)
+                                    && reachability != NetworkReachability::Offline
+                                {
                                     let task_core = core.clone();
                                     let task_capture = capture.clone();
                                     let task_store = controlled.clone();
-                                    let applied = runtime.spawn(async move {
-                                        let result = task_core.restart_changed_source(&task_store, source_profile, override_paths, generation, digest).await.map_err(|error| error.to_string());
-                                        if result.as_ref().is_ok_and(|changed| *changed) || result.is_err() {
-                                            let capture = task_capture.reconcile().await.map_err(|error| error.to_string())?;
-                                            if let zenclash_core::CaptureOutcome::ReconcileNeeded { failure, .. } = capture { return Err(failure); }
-                                        }
-                                        result
-                                    }).await.map_err(|error| error.to_string()).and_then(|result| result);
+                                    let applied = runtime
+                                        .spawn(async move {
+                                            let result = task_core
+                                                .restart_changed_source(
+                                                    &task_store,
+                                                    source_profile,
+                                                    override_paths,
+                                                    generation,
+                                                    digest,
+                                                )
+                                                .await
+                                                .map_err(|error| error.to_string());
+                                            if result.as_ref().is_ok_and(|changed| *changed)
+                                                || result.is_err()
+                                            {
+                                                let capture = task_capture
+                                                    .reconcile()
+                                                    .await
+                                                    .map_err(|error| error.to_string())?;
+                                                if let zenclash_core::CaptureOutcome::ReconcileNeeded {
+                                                    failure,
+                                                    ..
+                                                } = capture
+                                                {
+                                                    return Err(failure);
+                                                }
+                                            }
+                                            result
+                                        })
+                                        .await
+                                        .map_err(|error| error.to_string())
+                                        .and_then(|result| result);
                                     match applied {
                                         Ok(true) => notice = Some("automatic.config_restarted"),
-                                        Ok(false) => {},
+                                        Ok(false) => {}
                                         Err(failure) => {
                                             rejected_source = Some(identity);
                                             error = Some(failure);
@@ -246,13 +230,21 @@ impl ZenClashApp {
                                     }
                                 }
                             }
-                            Ok(None) => { source.observe(None); rejected_source = None; }
-                            Err(failure) => { source.observe(None); error = Some(failure); }
+                            Ok(None) => {
+                                source.observe(None);
+                                rejected_source = None;
+                            }
+                            Err(failure) => {
+                                source.observe(None);
+                                error = Some(failure);
+                            }
                         }
                     }
                     Err(failure) => error = Some(failure.to_string()),
                 }
-                let reported_error = error.clone().filter(|error| last_error.as_ref() != Some(error));
+                let reported_error = error
+                    .clone()
+                    .filter(|error| last_error.as_ref() != Some(error));
                 last_error = error;
                 if notice.is_some() || reported_error.is_some() {
                     let _ = this.update(cx, |this, cx| {
@@ -263,10 +255,14 @@ impl ZenClashApp {
                             page.report_automatic_runtime(notice, reported_error, cx);
                         });
                         if notice.is_some() {
-                            if this.current_page == crate::pages::Page::Proxies && this.main_window_visible {
-                                this.proxies_page.update(cx, |page, cx| page.profile_activated(cx));
+                            if this.current_page == crate::pages::Page::Proxies
+                                && this.main_window_visible
+                            {
+                                this.proxies_page
+                                    .update(cx, |page, cx| page.profile_activated(cx));
                             } else {
-                                this.proxies_page.update(cx, |page, _| page.profile_invalidated());
+                                this.proxies_page
+                                    .update(cx, |page, _| page.profile_invalidated());
                             }
                         }
                         this.refresh_tray_menu(cx);
@@ -274,107 +270,7 @@ impl ZenClashApp {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-        }).detach();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unstable_network_and_unknown_observations_do_not_confirm_link_loss() {
-        let now = Instant::now();
-        let mut state = EdgeStableObservation::default();
-        assert!(!state.observe(NetworkReachability::Offline, now));
-        assert!(!state.observe(NetworkReachability::Unknown, now));
-        assert!(!state.observe(NetworkReachability::Offline, now));
-        assert!(state.observe(NetworkReachability::Offline, now));
-    }
-
-    #[test]
-    fn edge_stable_observation_does_not_refire_after_commit_until_state_changes() {
-        let now = Instant::now();
-        let mut state = EdgeStableObservation::default();
-        assert!(!state.observe(NetworkReachability::Online, now));
-        assert!(state.observe(NetworkReachability::Online, now));
-        state.mark_committed(NetworkReachability::Online);
-
-        for offset in 1..=5 {
-            assert!(!state.observe(
-                NetworkReachability::Online,
-                now + Duration::from_secs(offset)
-            ));
-        }
-
-        // Single-tick Offline glitch followed by Online must not refire Online.
-        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(6)));
-        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(7)));
-        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(8)));
-
-        // Two consecutive Offline observations trigger suspension once.
-        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(9)));
-        assert!(state.observe(NetworkReachability::Offline, now + Duration::from_secs(10)));
-        state.mark_committed(NetworkReachability::Offline);
-        assert!(!state.observe(NetworkReachability::Offline, now + Duration::from_secs(11)));
-
-        // Returning to Online requires two stable ticks and fires once.
-        assert!(!state.observe(NetworkReachability::Online, now + Duration::from_secs(12)));
-        assert!(state.observe(NetworkReachability::Online, now + Duration::from_secs(13)));
-    }
-
-    #[test]
-    fn edge_stable_observation_retries_failed_state_with_exponential_backoff() {
-        let start = Instant::now();
-        let mut state = EdgeStableObservation::default();
-        assert!(!state.observe(NetworkReachability::Offline, start));
-        assert!(state.observe(NetworkReachability::Offline, start));
-
-        state.record_failure(start);
-        assert!(!state.observe(NetworkReachability::Offline, start + Duration::from_secs(1)));
-        assert!(state.observe(NetworkReachability::Offline, start + Duration::from_secs(2)));
-
-        let second_attempt = start + Duration::from_secs(2);
-        state.record_failure(second_attempt);
-        assert!(!state.observe(
-            NetworkReachability::Offline,
-            second_attempt + Duration::from_secs(3)
-        ));
-        assert!(state.observe(
-            NetworkReachability::Offline,
-            second_attempt + Duration::from_secs(4)
-        ));
-
-        // State change clears backoff immediately.
-        let switch = second_attempt + Duration::from_secs(4);
-        state.record_failure(switch);
-        assert!(!state.observe(NetworkReachability::Online, switch + Duration::from_secs(1)));
-        assert!(state.observe(NetworkReachability::Online, switch + Duration::from_secs(2)));
-        state.mark_committed(NetworkReachability::Online);
-        assert!(!state.observe(NetworkReachability::Online, switch + Duration::from_secs(3)));
-    }
-
-    #[test]
-    fn repeated_saves_debounce_until_the_latest_revision_is_stable() {
-        let first = SourceRevisionKey {
-            source_profile: "first.yaml".into(),
-            digest: [1; 32],
-        };
-        let second = SourceRevisionKey {
-            source_profile: "first.yaml".into(),
-            digest: [2; 32],
-        };
-        let other = SourceRevisionKey {
-            source_profile: "other.yaml".into(),
-            digest: [2; 32],
-        };
-        let mut state = StableObservation::<Option<SourceRevisionKey>>::default();
-        assert!(!state.observe(Some(first)));
-        assert!(!state.observe(Some(second.clone())));
-        assert!(state.observe(Some(second.clone())));
-        assert!(!state.observe(Some(other.clone())));
-        assert!(state.observe(Some(other)));
-        assert!(!state.observe(None));
-        assert!(!state.observe(Some(second)));
+        })
+        .detach();
     }
 }

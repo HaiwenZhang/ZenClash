@@ -416,21 +416,6 @@ mod windows_fallback;
 #[path = "execution_windows_lock.rs"]
 mod windows_lock;
 
-#[cfg(all(windows, feature = "client", feature = "standalone", not(feature = "test")))]
-pub(crate) fn reserve_legacy_install_repair() -> Result<CoreExecutionGuard> {
-    anyhow::ensure!(
-        // SAFETY: `IsUserAnAdmin` has no memory preconditions.
-        unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() } != 0,
-        "legacy service directory recovery requires an elevated installer"
-    );
-    let guard = CoreExecutionGuard::acquire()?;
-    windows_fallback::require_stopped_service()
-        .context("stop the service before repairing its legacy state directory")?;
-    windows_fallback::require_no_core_process(true)
-        .context("stop remaining service and core processes before repairing legacy state")?;
-    Ok(guard)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

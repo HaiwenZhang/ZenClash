@@ -62,24 +62,5 @@ pub fn acquire_service_repair_gate() -> Result<Option<ServiceRepairGate>> {
 }
 
 fn prepare_repair_directory() -> Result<std::path::PathBuf> {
-    let result = crate::prepare_service_install_directory();
-    #[cfg(all(windows, feature = "client", not(feature = "test")))]
-    if let Err(error) = result {
-        let paths = crate::service_paths()?;
-        let recovered = crate::core::windows_security::legacy_repair::recover(
-            paths.persistent_state_dir(),
-            crate::execution::reserve_legacy_install_repair,
-        );
-        return match recovered {
-            Ok(Some(backup)) => {
-                eprintln!("Preserved legacy service state at {:?}", backup.path);
-                // Keep core execution reserved until the fresh, private layout is ready.
-                crate::prepare_service_install_directory()
-                    .with_context(|| format!("legacy service state was preserved at {:?}", backup.path))
-            }
-            Ok(None) => Err(error),
-            Err(repair_error) => Err(error.context(format!("legacy directory recovery failed: {repair_error:#}"))),
-        };
-    }
-    result
+    crate::prepare_service_install_directory()
 }

@@ -227,6 +227,8 @@ pub enum ServiceErrorCode {
     ProxyClearFailed = 1010,
     ProxyApplyFailed = 1011,
     AppDataRootNotOwned = 1012,
+    SessionConflict = 1013,
+    ForbiddenOrigin = 1014,
 }
 
 pub fn owner_key(identity: &OwnerIdentity) -> String {
@@ -379,6 +381,9 @@ mod tests {
         assert_eq!(ServiceErrorCode::InvalidProxyConfig as u16, 1009);
         assert_eq!(ServiceErrorCode::ProxyClearFailed as u16, 1010);
         assert_eq!(ServiceErrorCode::ProxyApplyFailed as u16, 1011);
+        assert_eq!(ServiceErrorCode::AppDataRootNotOwned as u16, 1012);
+        assert_eq!(ServiceErrorCode::SessionConflict as u16, 1013);
+        assert_eq!(ServiceErrorCode::ForbiddenOrigin as u16, 1014);
     }
 
     #[test]

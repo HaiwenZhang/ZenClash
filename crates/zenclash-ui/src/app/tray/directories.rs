@@ -3,18 +3,19 @@
 use std::path::{Path, PathBuf};
 
 pub(super) fn load_profile_catalog_and_directories(
+    profile_store: Option<&zenclash_core::ProfileStore>,
+    data_root: Option<&Path>,
     profile_path: Option<&Path>,
     runtime: &zenclash_core::CoreRuntimeDescriptor,
 ) -> (
     Result<zenclash_core::ProfileCatalog, String>,
     Vec<(String, PathBuf)>,
 ) {
-    let data_paths = zenclash_core::AppDataPaths::discover();
-    let data_root = data_paths.as_ref().map(zenclash_core::AppDataPaths::root);
     let directories = tray_directories(profile_path, runtime, data_root);
-    let catalog = zenclash_core::ProfileStore::discover()
-        .and_then(|store| store.load())
-        .map_err(|error| error.to_string());
+    let catalog = match profile_store {
+        Some(store) => store.load().map_err(|error| error.to_string()),
+        None => Err(zenclash_i18n::text("profiles.errors.store_unavailable")),
+    };
     (catalog, directories)
 }
 

@@ -66,10 +66,7 @@ standalone = [
     "once_cell",
     "serde_json",
     "dep:serde_yaml",
-    "dep:tracing-estuary",
     "dep:parking_lot",
-    "flexi_logger",
-    "log",
     "response",
     "dep:platform_lib",
     "dep:nix",
@@ -80,7 +77,7 @@ standalone = [
 client = [
     "kode-bridge/client",
     "anyhow",
-    "log",
+    "tracing",
     "tokio",
     "once_cell",
     "serde_json",
@@ -122,16 +119,11 @@ tokio = { version = "1.54.1", features = [
 ], optional = true }
 tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", optional = true }
-tracing-estuary = { git = "https://github.com/Tunglies/tracing-estuary.git", rev = "dbfce033fa4cff8f936f3e7c2282af1277546f3c", optional = true }
-flexi_logger = { version = "0.31.10", optional = true }
-log = { version = "0.4.35", optional = true }
 parking_lot = { version = "0.13.0", optional = true }
-url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6.2", optional = true }
 system-configuration = { version = "0.8.0", optional = true }
-sysproxy = { git = "https://github.com/clash-verge-rev/sysproxy-rs.git", rev = "c37a60e1fc9079cc0f074200e2296afd1705208c", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 platform_lib = { package = "libc", version = "0.2.191", optional = true }
@@ -145,6 +137,7 @@ windows-sys = { version = "0.61.2", optional = true, features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_JobObjects",
     "Win32_System_Registry",
     "Win32_System_Pipes",
     "Win32_System_Services",

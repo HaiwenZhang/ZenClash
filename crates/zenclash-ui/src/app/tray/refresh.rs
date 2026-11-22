@@ -32,6 +32,16 @@ impl ZenClashApp {
         let mode_intent_generation = self.outbound_mode.intent_generation();
         let session = self.core_session.clone();
         let operational_status = self.operational_status.clone();
+        let profile_store = self.profile_store.clone();
+        let data_root = self
+            .preferences_store
+            .as_ref()
+            .and_then(|store| store.path().parent().map(std::path::Path::to_path_buf))
+            .or_else(|| {
+                profile_store
+                    .as_ref()
+                    .and_then(|store| store.root().parent().map(std::path::Path::to_path_buf))
+            });
         let read_source = std::sync::Arc::new(RuntimeReadSource::default());
         let submitted_source = read_source.clone();
         let task = self.runtime.spawn(async move {
@@ -40,7 +50,12 @@ impl ZenClashApp {
             let directories_profile = runtime.profile_path.clone();
             let descriptor = runtime.descriptor;
             let profiles = tokio::task::spawn_blocking(move || {
-                load_profile_catalog_and_directories(directories_profile.as_deref(), &descriptor)
+                load_profile_catalog_and_directories(
+                    profile_store.as_ref(),
+                    data_root.as_deref(),
+                    directories_profile.as_deref(),
+                    &descriptor,
+                )
             })
             .await;
             let groups = tray_proxy_groups(runtime.catalog, &runtime.config.mode);

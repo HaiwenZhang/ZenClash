@@ -17,17 +17,12 @@ pub mod design;
 /// Navigable application pages and their live Mihomo views.
 pub mod pages;
 
-/// Shared outbound routing modes and intent coordination.
-pub mod outbound_mode;
-
-mod application_commands;
 mod preference_previews;
 mod proxy_selection;
 mod runtime_read_source;
-pub use application_commands::ApplicationCommands;
 
-/// Compatibility name for the shared application commands and recovery context.
-pub type ProfileService = ApplicationCommands;
+pub(crate) use zenclash_app::commands as application_commands;
+pub use zenclash_app::{ApplicationCommands, outbound_mode};
 
 #[cfg(test)]
 #[path = "../build_version.rs"]

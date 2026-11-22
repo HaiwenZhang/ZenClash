@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tray-icon.workspace = true
+zenclash-app.workspace = true
 zenclash-core = { path = "../zenclash-core" }
 zenclash-i18n.workspace = true
 
@@ -61,6 +62,7 @@ objc2-foundation = { workspace = true, features = [
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+zenclash-app = { path = "../zenclash-app", features = ["test-support"] }
 zenclash-core = { path = "../zenclash-core", features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

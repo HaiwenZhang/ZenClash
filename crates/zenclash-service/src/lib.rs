@@ -1,14 +1,19 @@
 // Modified for the ZenClash fork on 2026-10-04; see NOTICE.md. GPL-3.0-only.
 mod channel;
 mod core;
+#[cfg(feature = "standalone")]
+pub mod daemon;
 #[cfg(any(feature = "client", feature = "standalone"))]
 pub mod execution;
+#[cfg(feature = "standalone")]
+pub mod install;
 #[cfg(all(
     target_os = "macos",
     any(feature = "client", feature = "standalone"),
     any(not(feature = "test"), test)
 ))]
 mod macos_activation;
+pub mod protocol;
 #[cfg(all(windows, any(feature = "client", feature = "standalone")))]
 mod windows_activation;
 #[cfg(all(windows, any(feature = "client", feature = "standalone")))]

@@ -63,6 +63,24 @@ async fn protocol_mismatch_is_rejected_before_payload_deserialization() -> Resul
 
 #[tokio::test]
 #[serial]
+async fn non_empty_origin_header_is_rejected_for_dns_rebinding_protection() -> Result<()> {
+    let server = start_server().await?;
+    let response = connect()
+        .await?
+        .post(IpcCommand::StartClash.as_ref())
+        .header("Origin", "https://attacker.example")
+        .json_body(&serde_json::Value::Null)
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), 403);
+    let wire = response.json::<WireResponse>()?;
+    assert_eq!(wire.code, ServiceErrorCode::ForbiddenOrigin as u16);
+    stop_server(server).await
+}
+
+#[tokio::test]
+#[serial]
 async fn restarting_an_owner_invalidates_the_previous_session() -> Result<()> {
     let server = start_server().await?;
     let credentials = common::owner_credentials();

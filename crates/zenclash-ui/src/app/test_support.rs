@@ -26,5 +26,6 @@ pub(super) fn app_test_services(
         startup_notice: None,
         startup_error: None,
         restart_after_exit: Default::default(),
+        safe_mode: zenclash_app::SafeMode::disabled(),
     }
 }

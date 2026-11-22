@@ -56,12 +56,13 @@ impl ServiceError {
         Self::new(ServiceErrorCode::InvalidProxyConfig, message)
     }
 
-    pub(crate) fn proxy_clear_failed(message: impl Into<String>) -> Self {
-        Self::new(ServiceErrorCode::ProxyClearFailed, message)
+    pub(crate) fn forbidden_origin(message: impl Into<String>) -> Self {
+        Self::new(ServiceErrorCode::ForbiddenOrigin, message)
     }
 
-    pub(crate) fn proxy_apply_failed(message: impl Into<String>) -> Self {
-        Self::new(ServiceErrorCode::ProxyApplyFailed, message)
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn session_conflict(message: impl Into<String>) -> Self {
+        Self::new(ServiceErrorCode::SessionConflict, message)
     }
 }
 
@@ -89,7 +90,78 @@ pub(crate) fn hash_session_token(token: &str) -> anyhow::Result<String> {
         .collect())
 }
 
+/// Rejects browser DNS-rebinding attempts via non-empty `Origin` or non-loopback `Host` headers.
+pub(crate) fn validate_request_origin_and_host(headers: &http::HeaderMap) -> Result<(), ServiceError> {
+    for origin in headers.get_all(http::header::ORIGIN) {
+        let Ok(value) = origin.to_str() else {
+            return Err(ServiceError::forbidden_origin("non-UTF-8 Origin header is rejected"));
+        };
+        if !value.trim().is_empty() {
+            return Err(ServiceError::forbidden_origin(
+                "cross-origin browser requests are forbidden on the privileged IPC server",
+            ));
+        }
+    }
+
+    let mut host_headers = headers.get_all(http::header::HOST).iter();
+    if let Some(first_host) = host_headers.next() {
+        if host_headers.next().is_some() {
+            return Err(ServiceError::forbidden_origin("duplicate Host headers are rejected"));
+        }
+        let Ok(raw_host) = first_host.to_str() else {
+            return Err(ServiceError::forbidden_origin("non-UTF-8 Host header is rejected"));
+        };
+        if !is_allowed_local_host(raw_host) {
+            return Err(ServiceError::forbidden_origin(
+                "non-local Host header is forbidden on the privileged IPC server",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_allowed_local_host(raw_host: &str) -> bool {
+    let trimmed = raw_host.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let host_part = if let Some(rest) = trimmed.strip_prefix('[') {
+        let Some((ipv6, remainder)) = rest.split_once(']') else {
+            return false;
+        };
+        if !remainder.is_empty() {
+            let Some(port) = remainder.strip_prefix(':') else {
+                return false;
+            };
+            if port.is_empty() || port.parse::<u16>().is_err() {
+                return false;
+            }
+        }
+        return ipv6.parse::<std::net::Ipv6Addr>().is_ok_and(|addr| addr.is_loopback());
+    } else if let Some((host, port)) = trimmed.rsplit_once(':') {
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+        host
+    } else {
+        trimmed
+    };
+
+    if host_part.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    host_part
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|addr| addr.is_loopback())
+}
+
 pub fn ipc_request_context_to_auth_context(ctx: &RequestContext) -> Result<AuthStatus, KodeBridgeError> {
+    if validate_request_origin_and_host(&ctx.headers).is_err() {
+        return Err(KodeBridgeError::ClientError { status: 403 });
+    }
     let headers = &ctx.headers;
     match headers.get("X-IPC-Magic") {
         Some(token) if token == IPC_AUTH_EXPECT => Ok(AuthStatus::Authorized),
@@ -610,6 +682,84 @@ mod tests {
         assert_eq!(owner.app_data_root, std::fs::canonicalize(&app_root)?);
         std::fs::remove_dir_all(app_root)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod origin_host_tests {
+    use super::validate_request_origin_and_host;
+    use crate::ServiceErrorCode;
+    use http::{HeaderMap, HeaderValue, header};
+
+    #[test]
+    fn allows_local_requests_without_origin() {
+        let mut headers = HeaderMap::new();
+        assert!(validate_request_origin_and_host(&headers).is_ok());
+
+        for valid_host in [
+            "localhost",
+            "LOCALHOST:9090",
+            "127.0.0.1",
+            "127.0.0.1:7890",
+            "[::1]",
+            "[::1]:9090",
+        ] {
+            headers.insert(header::HOST, HeaderValue::from_static(valid_host));
+            assert!(
+                validate_request_origin_and_host(&headers).is_ok(),
+                "expected {valid_host} to be accepted"
+            );
+        }
+
+        // Empty Origin header is permitted; only non-empty Origin headers are rejected.
+        headers.insert(header::ORIGIN, HeaderValue::from_static(""));
+        assert!(validate_request_origin_and_host(&headers).is_ok());
+    }
+
+    #[test]
+    fn rejects_non_empty_origin_headers() {
+        for origin in ["https://evil.example", "http://localhost:3000", "null"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static("localhost"));
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            let error =
+                validate_request_origin_and_host(&headers).expect_err("non-empty Origin header must be rejected");
+            assert_eq!(error.code, ServiceErrorCode::ForbiddenOrigin);
+        }
+    }
+
+    #[test]
+    fn rejects_non_local_and_malformed_host_headers() {
+        for bad_host in [
+            "",
+            "evil.example",
+            "evil.example:9090",
+            "localhost.evil.example",
+            "192.168.1.10",
+            "192.168.1.10:9090",
+            "localhost:notaport",
+            "[2001:db8::1]:9090",
+            "[::1",
+            "[::1]:abc",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, HeaderValue::from_static(bad_host));
+            assert_eq!(
+                validate_request_origin_and_host(&headers).map_err(|error| error.code),
+                Err(ServiceErrorCode::ForbiddenOrigin),
+                "expected {bad_host:?} to be rejected"
+            );
+        }
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(header::HOST, HeaderValue::from_static("localhost"));
+        duplicate.append(header::HOST, HeaderValue::from_static("localhost"));
+        assert_eq!(
+            validate_request_origin_and_host(&duplicate)
+                .expect_err("duplicate Host headers must be rejected")
+                .code,
+            ServiceErrorCode::ForbiddenOrigin
+        );
     }
 }
 

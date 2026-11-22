@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/zenclash-app",
     "crates/zenclash-core",
     "crates/zenclash-i18n",
     "crates/zenclash-service",
@@ -59,6 +60,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+zenclash-app = { path = "crates/zenclash-app" }
 zenclash-i18n = { path = "crates/zenclash-i18n" }
 
 # Keep the CI lint policy enforceable from a plain `cargo clippy`.

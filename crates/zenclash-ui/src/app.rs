@@ -9,8 +9,7 @@ use gpui_kit::{
 };
 use zenclash_core::{
     AppPreferences, AppPreferencesStore, AppearancePreference, ControlledConfigStore, CoreKind,
-    CoreSession, LogMonitor, MihomoClient, MihomoLogLevel, OperationalStatus, ServiceManager,
-    SystemProxySession, TrafficCaptureSession, TrafficHistoryStore, TrafficMonitor,
+    CoreSession, LogMonitor, OperationalStatus, ServiceManager, TrafficCaptureSession,
 };
 
 mod actions;
@@ -25,28 +24,22 @@ mod profile_updates;
 mod system_proxy;
 #[cfg(test)]
 mod test_support;
-mod traffic_history;
 mod tray;
 mod view;
 mod window;
 
+use crate::outbound_mode::{OutboundMode, OutboundModeCoordinator};
 pub use bootstrap::{
-    BootstrappedApplication, create_main_window, create_main_window_with_pending_startup,
+    create_main_window, create_main_window_with_pending_startup,
     create_main_window_with_service_startup, init, reopen_main_window,
 };
 use platform::open_directory;
 pub use system_proxy::finish_native_shutdown;
-pub use traffic_history::TrafficHistorySession;
-
-/// Process arguments prepared only after capture and kernel shutdown succeeds.
-pub struct RestartRequest {
-    /// Executable to launch again.
-    pub executable: PathBuf,
-    /// Explicit local-kernel choice for the new session.
-    pub continue_local: bool,
-}
-use crate::outbound_mode::{OutboundMode, OutboundModeCoordinator};
 use tray::LatestCommandQueue;
+pub use zenclash_app::{
+    TrafficHistorySession,
+    bootstrap::{AppServices, BootstrappedApplication, RestartRequest},
+};
 
 use crate::{
     components::{
@@ -126,6 +119,8 @@ pub struct ZenClashApp {
     proxies_page: Entity<ProxiesPage>,
     runtime_page: Entity<RuntimePage>,
     tray_core_running: Option<bool>,
+    profile_store: Option<zenclash_core::ProfileStore>,
+    override_store: Option<zenclash_core::YamlOverrideStore>,
     profile_path: Option<PathBuf>,
     controlled_config_store: ControlledConfigStore,
     main_window: AnyWindowHandle,
@@ -160,52 +155,6 @@ pub struct ZenClashApp {
     _subscriptions: Vec<Subscription>,
 }
 
-/// Runtime services supplied to the application window.
-pub struct AppServices {
-    /// Defer capture restoration and background commands until bootstrap completes.
-    pub initializing: bool,
-    /// Watch for delayed Windows service readiness when saved TUN remains requested.
-    pub await_service_handoff: bool,
-    /// Profile repository opened during bootstrap.
-    pub profile_store: Option<zenclash_core::ProfileStore>,
-    /// YAML override repository opened during bootstrap.
-    pub override_store: Option<zenclash_core::YamlOverrideStore>,
-    /// Persistent application-preference store discovered during process bootstrap.
-    pub preferences_store: Option<AppPreferencesStore>,
-    /// Single validated preference snapshot used consistently for startup and UI state.
-    pub preferences: AppPreferences,
-    /// Explicit runtime core selected for this application process.
-    pub core_kind: CoreKind,
-    /// Serialized runtime-core transition owner.
-    pub core_session: CoreSession,
-    /// Capture owner shared with final process cleanup, including native quit.
-    pub traffic_capture: TrafficCaptureSession,
-    /// Native proxy session shared with the runtime page's settings editor.
-    pub system_proxy_session: Option<SystemProxySession>,
-    /// Typed client following the shared runtime binding.
-    pub client: MihomoClient,
-    /// Shared reconnecting traffic stream.
-    pub traffic_monitor: Arc<TrafficMonitor>,
-    /// Shared reconnecting log stream.
-    pub log_monitor: Arc<LogMonitor>,
-    /// Traffic-history store discovered before GPUI starts handling events.
-    pub traffic_history_store: Option<TrafficHistoryStore>,
-    /// Owned sampler shared with the executable for final shutdown flushing.
-    pub traffic_history_session: Option<Arc<TrafficHistorySession>>,
-    /// Active Clash/Mihomo YAML path, when known.
-    pub profile_path: Option<PathBuf>,
-    /// Persistent controlled-config layer merged over the active profile.
-    pub controlled_config_store: ControlledConfigStore,
-    /// Tokio runtime used for network and blocking bridge tasks.
-    pub runtime: tokio::runtime::Handle,
-    /// Visible explanation when startup recovered from an unusable preferred core.
-    pub startup_notice: Option<String>,
-    /// Persistent startup failure shown while the app runs in offline recovery mode.
-    pub startup_error: Option<String>,
-    /// Deferred application restart request consumed after the instance lock is released.
-    pub restart_after_exit: Arc<parking_lot::Mutex<Option<RestartRequest>>>,
-}
-
 impl ZenClashApp {
     fn new(
         services: AppServices,
@@ -238,12 +187,15 @@ impl ZenClashApp {
             startup_notice,
             startup_error,
             restart_after_exit,
+            safe_mode: _,
         } = services;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
         let main_window = window.window_handle();
         let proxies_page =
             cx.new(|cx| ProxiesPage::new_with_session(core_session.clone(), runtime.clone(), cx));
+        let app_profile_store = profile_store.clone();
+        let app_override_store = override_store.clone();
         let app_profile_path = profile_path.clone();
         let app_controlled_config_store = controlled_config_store.clone();
         if !initializing {
@@ -351,6 +303,8 @@ impl ZenClashApp {
             proxies_page,
             runtime_page,
             tray_core_running: None,
+            profile_store: app_profile_store,
+            override_store: app_override_store,
             profile_path: app_profile_path,
             controlled_config_store: app_controlled_config_store,
             main_window,
