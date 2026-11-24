@@ -21,6 +21,7 @@ fn native_tray_menu_state_and_command_bindings_map_modes_profiles_groups_and_dir
     group.controller_name = "Proxy".into();
     group.name = "Proxy".into();
     group.selectable = true;
+    group.has_more = true;
     group.now = "HK-01".into();
     group.proxies = Arc::from([
         TrayProxyNode {
