@@ -432,9 +432,11 @@ fn committed_fixture() -> (
     ApplicationCommands,
     Arc<ProfileApplyOutcome>,
 ) {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "zenclash-committed-confirmation-{}-{}",
+        "zenclash-committed-confirmation-{}-{}-{}",
         std::process::id(),
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
