@@ -46,10 +46,4 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"not executed");
         std::fs::remove_file(path).unwrap();
     }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_capability_read_failure_is_not_absence() {
-        assert!(read_linux_capabilities(-1).is_err());
-    }
 }

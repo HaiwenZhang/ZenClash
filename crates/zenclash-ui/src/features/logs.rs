@@ -126,7 +126,7 @@ pub(in crate::features) enum LogEvent {
 impl gpui_kit::EventEmitter<LogEvent> for LogsView {}
 
 impl LogsView {
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn design_validation_log_id(&self) -> Option<usize> {
         self.presentation
             .matches
@@ -134,7 +134,7 @@ impl LogsView {
             .map(|&index| Arc::as_ptr(&self.presentation.entries[index]) as usize)
     }
 
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn prepare_design_validation(&mut self) {
         let entries = ["info", "error", "debug", "warning"].into_iter().cycle().take(128).enumerate().map(|(index, level)| {
             let (payload, fields) = match index % 4 {

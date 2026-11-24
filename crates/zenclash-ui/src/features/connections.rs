@@ -427,7 +427,7 @@ impl ConnectionsView {
             )
     }
 
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn inspect_for_design_validation(
         &mut self,
         id: Option<String>,

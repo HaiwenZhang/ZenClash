@@ -285,4 +285,10 @@ mod tests {
         std::fs::set_permissions(&path, permissions).unwrap();
         path
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_capability_read_failure_is_not_absence() {
+        assert!(read_linux_capabilities(-1).is_err());
+    }
 }

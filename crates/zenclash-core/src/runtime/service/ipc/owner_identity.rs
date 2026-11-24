@@ -64,11 +64,6 @@ pub(crate) fn open_or_create_private_current_user_file(path: &Path) -> Result<st
     crate::platform::fs_io::open_or_create_private_current_user_file(path)
 }
 
-#[cfg(windows)]
-pub(crate) fn protect_current_user_file(path: &Path, create: bool) -> Result<std::fs::File> {
-    crate::platform::fs_io::protect_current_user_file(path, create)
-}
-
 /// Repairs an application data root Windows no longer reports as owned by the current user.
 ///
 /// The Service authenticates by comparing this directory's owner SID against the caller's, so a

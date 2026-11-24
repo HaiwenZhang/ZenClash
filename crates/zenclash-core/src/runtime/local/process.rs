@@ -27,7 +27,9 @@ mod restart;
 use restart::readiness_attempt_timeout;
 mod spawn;
 #[cfg(test)]
-use spawn::{collect_output, stop_running_child};
+use spawn::collect_output;
+#[cfg(all(test, unix))]
+use spawn::stop_running_child;
 use spawn::{local_launch_payload, spawn_child, stop_child};
 
 #[cfg(test)]

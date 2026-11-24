@@ -137,11 +137,11 @@ impl ProfileLibrary {
     pub(super) fn set_catalog_filter(&mut self, filter: super::state::ProfileFilter) {
         self.forms.catalog_view.set_filter(filter, &self.catalog);
     }
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn fixture_catalog_mut(&mut self) -> &mut ProfileCatalog {
         &mut self.catalog
     }
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn prepare_fixture_catalog_view(&mut self) {
         self.forms.catalog_view.prepare(&self.catalog);
     }

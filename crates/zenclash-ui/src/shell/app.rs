@@ -209,13 +209,13 @@ impl ZenClashApp {
                     cx.notify();
                 }
             }),
+            #[cfg(target_os = "linux")]
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && !this.shell.main_window_visible {
+                    this.restore_main_window_after_activation(cx);
+                }
+            }),
         ];
-        #[cfg(target_os = "linux")]
-        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() && !this.shell.main_window_visible {
-                this.restore_main_window_after_activation(cx);
-            }
-        }));
         WiredRuntime {
             handles: AppCoreHandles {
                 core_kind,

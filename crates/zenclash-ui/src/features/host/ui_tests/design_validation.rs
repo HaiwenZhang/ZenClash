@@ -1,14 +1,20 @@
 //! Native page rendering with isolated fixtures or opt-in real subscription validation.
 
 use super::*;
+use crate::features::host::RuntimePage;
+use crate::runtime_host::lifecycle_schedule::UiVisibility;
 use gpui_kit::base::TestSupportExt;
 use gpui_kit::component::{ActiveTheme, Root, ThemeMode, WindowExt, h_flex};
 use gpui_kit::{
     AnyView, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render, Styled,
     Window, WindowBounds, WindowOptions, div, point, px, size,
 };
-use std::{cell::RefCell, fs, path::PathBuf, rc::Rc, sync::Arc};
-use zenclash_core::{Observation, RuleCatalog};
+use serde_json::json;
+use std::{cell::RefCell, fs, path::PathBuf, rc::Rc, sync::Arc, time::Duration};
+use zenclash_core::{
+    AutostartStatus, ConnectionsSnapshot, DiagnosticStepKind, Observation, RuleCatalog,
+    RuntimeConfig, SystemProxyStatus,
+};
 
 mod live;
 
@@ -208,7 +214,7 @@ fn native_pages_render_for_design_validation() {
                                         page.persistent_loading = false;
                                         page.shell.startup_error = None;
                                         page.error = None;
-                                        page.shell.ui_visibility = lifecycle::UiVisibility::new(true);
+                                        page.shell.ui_visibility = UiVisibility::new(true);
                                         page.shell.live_updates_enabled.send_replace(false);
                                         page.shell.body_scroll
                                             .set_offset(point(px(0.), px(0.)));

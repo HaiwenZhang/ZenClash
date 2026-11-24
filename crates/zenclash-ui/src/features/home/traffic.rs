@@ -25,7 +25,7 @@ pub(super) struct HomeChartState {
 }
 
 impl HomeChartState {
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(super) fn prepare_design_validation(&mut self, generation: u64) -> TrafficSnapshot {
         *self = Self::default();
         let mut snapshot = TrafficSnapshot::default();

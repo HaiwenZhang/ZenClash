@@ -6,7 +6,6 @@ use std::{path::PathBuf, process::Command, sync::Arc};
 use parking_lot::{Mutex, RwLock};
 
 use super::*;
-#[cfg(unix)]
 use crate::MihomoClient;
 
 mod frozen_launch_tests;

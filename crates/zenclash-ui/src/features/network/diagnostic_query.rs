@@ -107,7 +107,7 @@ impl NetworkDiagnosticQueryState {
         ));
     }
 
-    #[cfg(all(test, target_os = "windows"))]
+    #[cfg(test)]
     pub(in crate::features) fn report_for_design_validation(
         &mut self,
     ) -> Option<&mut DiagnosticReport> {

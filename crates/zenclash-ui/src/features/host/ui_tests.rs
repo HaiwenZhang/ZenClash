@@ -7,7 +7,6 @@ use gpui_kit::TestAppContext;
 use gpui_kit::test::TestWindowExt;
 use std::fs;
 
-#[cfg(target_os = "windows")]
 mod design_validation;
 mod service_maintenance;
 mod service_tun;

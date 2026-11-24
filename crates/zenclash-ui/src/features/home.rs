@@ -53,7 +53,7 @@ mod selector;
 mod status;
 mod traffic;
 mod transitions;
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
 mod validation;
 
 const MIN_TRAFFIC_CHART_CEILING: u64 = 1_024;
