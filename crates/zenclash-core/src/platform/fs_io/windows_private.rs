@@ -34,12 +34,16 @@ const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
 pub(crate) fn current_sid() -> Result<String> {
     let buffer = query_process_token(TokenUser, "SID")?;
+    // SAFETY: `query_process_token` succeeded with `TokenUser` into a `usize`-aligned buffer
+    // sized by `GetTokenInformation`, so its start holds an initialized `TOKEN_USER`.
     let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
     sid_to_string(token_user.User.Sid)
 }
 
 fn current_token_owner_matches(file: &std::fs::File) -> Result<bool> {
     let buffer = query_process_token(TokenOwner, "owner SID")?;
+    // SAFETY: `query_process_token` succeeded with `TokenOwner` into a `usize`-aligned buffer
+    // sized by `GetTokenInformation`, so its start holds an initialized `TOKEN_OWNER`.
     let token_owner = unsafe { &*buffer.as_ptr().cast::<TOKEN_OWNER>() };
     if token_owner.Owner.is_null() {
         return Ok(false);
@@ -49,12 +53,16 @@ fn current_token_owner_matches(file: &std::fs::File) -> Result<bool> {
 
 fn query_process_token(info_class: TOKEN_INFORMATION_CLASS, label: &str) -> Result<Vec<usize>> {
     let mut token = std::ptr::null_mut();
+    // SAFETY: `GetCurrentProcess()` returns the current process pseudo-handle and `token` is
+    // valid writable storage for the opened token handle.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(std::io::Error::last_os_error()).context("failed to open process token");
     }
     let token = OwnedHandle(token);
 
     let mut required = 0_u32;
+    // SAFETY: `token.0` is a live `TOKEN_QUERY` handle; passing a null buffer with length 0
+    // queries the required byte size into `required`.
     unsafe { GetTokenInformation(token.0, info_class, std::ptr::null_mut(), 0, &mut required) };
     if required == 0 {
         return Err(std::io::Error::last_os_error())
@@ -62,6 +70,8 @@ fn query_process_token(info_class: TOKEN_INFORMATION_CLASS, label: &str) -> Resu
     }
     let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
     let mut buffer = vec![0_usize; words];
+    // SAFETY: `token.0` is a live `TOKEN_QUERY` handle and `buffer` provides at least `required`
+    // bytes of `usize`-aligned writable storage.
     if unsafe {
         GetTokenInformation(
             token.0,
@@ -150,6 +160,8 @@ fn create_file(path: &Path, descriptor: &LocalSecurityDescriptor) -> Result<std:
         bInheritHandle: 0,
     };
     let wide = wide_path(path)?;
+    // SAFETY: `wide` is NUL-terminated UTF-16 and `attributes` points to `descriptor`, both of
+    // which remain valid for the duration of `CreateFileW`.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -165,6 +177,7 @@ fn create_file(path: &Path, descriptor: &LocalSecurityDescriptor) -> Result<std:
         return Err(std::io::Error::last_os_error())
             .context("failed to create private current-user file");
     }
+    // SAFETY: `CreateFileW` succeeded and returned an owned, non-invalid file handle.
     let file = unsafe { std::fs::File::from_raw_handle(handle) };
     validate_private_file(&file, descriptor.owner()?)?;
     Ok(file)
@@ -172,6 +185,7 @@ fn create_file(path: &Path, descriptor: &LocalSecurityDescriptor) -> Result<std:
 
 fn open_file(path: &Path) -> Result<std::fs::File> {
     let wide = wide_path(path)?;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path valid for the duration of `CreateFileW`.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -187,18 +201,23 @@ fn open_file(path: &Path) -> Result<std::fs::File> {
         return Err(std::io::Error::last_os_error())
             .context("failed to open private current-user file");
     }
-    Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+    // SAFETY: `CreateFileW` succeeded and returned an owned, non-invalid file handle.
+    let file = unsafe { std::fs::File::from_raw_handle(handle) };
+    Ok(file)
 }
 
 fn validate_private_file(file: &std::fs::File, expected_owner: PSID) -> Result<()> {
     let handle = file.as_raw_handle();
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` belongs to live `file` and `information` is valid writable storage.
     if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
         return Err(std::io::Error::last_os_error())
             .context("failed to inspect private file metadata");
     }
+    // SAFETY: `handle` belongs to live `file`.
+    let file_type = unsafe { GetFileType(handle) };
     if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
-        || unsafe { GetFileType(handle) } != FILE_TYPE_DISK
+        || file_type != FILE_TYPE_DISK
     {
         bail!("current-user file is not an ordinary file");
     }
@@ -206,6 +225,8 @@ fn validate_private_file(file: &std::fs::File, expected_owner: PSID) -> Result<(
     let mut owner = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut security = std::ptr::null_mut();
+    // SAFETY: `handle` belongs to live `file` and all out-pointers reference stack storage;
+    // the allocated `security` descriptor is freed via `LocalSecurityDescriptor`.
     let status = unsafe {
         GetSecurityInfo(
             handle,
@@ -222,11 +243,19 @@ fn validate_private_file(file: &std::fs::File, expected_owner: PSID) -> Result<(
         bail!("failed to inspect private file security: Windows error {status}");
     }
     let security = LocalSecurityDescriptor(security);
-    if owner.is_null() || unsafe { EqualSid(owner, expected_owner) } == 0 || dacl.is_null() {
+    let owner_matches_expected = if owner.is_null() {
+        false
+    } else {
+        // SAFETY: `owner` points into the live `security` descriptor and `expected_owner` is a
+        // valid SID supplied by the caller.
+        unsafe { EqualSid(owner, expected_owner) != 0 }
+    };
+    if !owner_matches_expected || dacl.is_null() {
         bail!("current-user file owner or DACL is invalid");
     }
     let mut control = 0_u16;
     let mut revision = 0_u32;
+    // SAFETY: `security.0` is a valid security descriptor and `control`/`revision` are writable.
     if unsafe { GetSecurityDescriptorControl(security.0, &mut control, &mut revision) } == 0
         || control & SE_DACL_PROTECTED == 0
     {
@@ -236,11 +265,15 @@ fn validate_private_file(file: &std::fs::File, expected_owner: PSID) -> Result<(
     let mut owner_ace = false;
     let mut system_ace = false;
     let mut administrators_ace = false;
-    for index in 0..unsafe { (*dacl).AceCount } as u32 {
+    // SAFETY: `dacl` is non-null and points to a valid `ACL` inside the live `security` descriptor.
+    let ace_count = unsafe { (*dacl).AceCount };
+    for index in 0..u32::from(ace_count) {
         let mut ace = std::ptr::null_mut();
+        // SAFETY: `dacl` is valid while `security` lives, `index < ace_count`, and `ace` is writable.
         if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
             bail!("current-user file DACL could not be inspected");
         }
+        // SAFETY: `GetAce` succeeded and returned a non-null ACE header within `dacl`.
         let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
         if allowed.Header.AceType != ACCESS_ALLOWED_ACE_TYPE
             || allowed.Mask & FILE_ALL_ACCESS != FILE_ALL_ACCESS
@@ -250,20 +283,35 @@ fn validate_private_file(file: &std::fs::File, expected_owner: PSID) -> Result<(
         let ace_sid = std::ptr::addr_of!(allowed.SidStart)
             .cast_mut()
             .cast::<c_void>();
+        // SAFETY: `ace_sid` points to the inline SID in `ACCESS_ALLOWED_ACE` inside live `dacl`.
         if unsafe { IsValidSid(ace_sid) } == 0 {
             bail!("current-user file DACL contains an invalid SID");
         }
-        if unsafe { EqualSid(ace_sid, expected_owner) } != 0 {
+        // SAFETY: `ace_sid` was validated by `IsValidSid` and `expected_owner` is a valid SID.
+        let is_owner = unsafe { EqualSid(ace_sid, expected_owner) } != 0;
+        let is_system = if is_owner {
+            false
+        } else {
+            // SAFETY: `ace_sid` was validated by `IsValidSid` and stays live with `security`.
+            unsafe { IsWellKnownSid(ace_sid, WinLocalSystemSid) != 0 }
+        };
+        let is_administrators = if is_owner || is_system {
+            false
+        } else {
+            // SAFETY: `ace_sid` was validated by `IsValidSid` and stays live with `security`.
+            unsafe { IsWellKnownSid(ace_sid, WinBuiltinAdministratorsSid) != 0 }
+        };
+        if is_owner {
             owner_ace = true;
-        } else if unsafe { IsWellKnownSid(ace_sid, WinLocalSystemSid) } != 0 {
+        } else if is_system {
             system_ace = true;
-        } else if unsafe { IsWellKnownSid(ace_sid, WinBuiltinAdministratorsSid) } != 0 {
+        } else if is_administrators {
             administrators_ace = true;
         } else {
             bail!("current-user file DACL grants access to another SID");
         }
     }
-    if unsafe { (*dacl).AceCount } != 3 || !owner_ace || !system_ace || !administrators_ace {
+    if ace_count != 3 || !owner_ace || !system_ace || !administrators_ace {
         bail!("current-user file DACL is missing a required principal");
     }
     Ok(())
@@ -285,6 +333,7 @@ fn take_file_ownership(path: &Path, existing: &std::fs::File, expected: PSID) ->
     if !same_file(existing, &file)? {
         bail!("file changed while normalizing private current-user file owner");
     }
+    // SAFETY: `file` is an open handle with `WRITE_OWNER` access and `expected` is a valid SID.
     let status = unsafe {
         SetSecurityInfo(
             file.as_raw_handle(),
@@ -305,11 +354,13 @@ fn take_file_ownership(path: &Path, existing: &std::fs::File, expected: PSID) ->
 
 fn same_file(left: &std::fs::File, right: &std::fs::File) -> Result<bool> {
     let mut left_info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `left` is an open file handle and `left_info` is valid writable storage.
     if unsafe { GetFileInformationByHandle(left.as_raw_handle(), &mut left_info) } == 0 {
         return Err(std::io::Error::last_os_error())
             .context("failed to inspect existing private file identity");
     }
     let mut right_info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `right` is an open file handle and `right_info` is valid writable storage.
     if unsafe { GetFileInformationByHandle(right.as_raw_handle(), &mut right_info) } == 0 {
         return Err(std::io::Error::last_os_error())
             .context("failed to inspect reopened private file identity");
@@ -323,6 +374,7 @@ fn same_file(left: &std::fs::File, right: &std::fs::File) -> Result<bool> {
 
 pub(crate) fn take_directory_ownership(path: &Path, expected: PSID) -> Result<()> {
     let directory = open_no_reparse(path, true, WRITE_OWNER)?;
+    // SAFETY: `directory` is an open handle with `WRITE_OWNER` access and `expected` is a valid SID.
     let status = unsafe {
         SetSecurityInfo(
             directory.as_raw_handle(),
@@ -344,6 +396,8 @@ pub(crate) fn take_directory_ownership(path: &Path, expected: PSID) -> Result<()
 pub(crate) fn owner_matches(directory: &std::fs::File, expected: PSID) -> Result<bool> {
     let mut owner = std::ptr::null_mut();
     let mut security = std::ptr::null_mut();
+    // SAFETY: `directory` is an open handle with `READ_CONTROL` access; `owner` and `security`
+    // are valid out-pointers and `security` is owned by `LocalSecurityDescriptor` below.
     let status = unsafe {
         GetSecurityInfo(
             directory.as_raw_handle(),
@@ -360,13 +414,19 @@ pub(crate) fn owner_matches(directory: &std::fs::File, expected: PSID) -> Result
         bail!("failed to inspect the application data root owner: Windows error {status}");
     }
     let security = LocalSecurityDescriptor(security);
-    let matches = !owner.is_null() && unsafe { EqualSid(owner, expected) } != 0;
+    let matches = if owner.is_null() {
+        false
+    } else {
+        // SAFETY: `owner` points into the live `security` descriptor and `expected` is a valid SID.
+        unsafe { EqualSid(owner, expected) != 0 }
+    };
     drop(security);
     Ok(matches)
 }
 
 pub(crate) fn open_no_reparse(path: &Path, directory: bool, access: u32) -> Result<std::fs::File> {
     let wide = wide_path(path)?;
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path valid for the duration of `CreateFileW`.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -382,9 +442,11 @@ pub(crate) fn open_no_reparse(path: &Path, directory: bool, access: u32) -> Resu
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("failed to open {path:?}"));
     }
+    // SAFETY: `CreateFileW` succeeded and returned an owned, non-invalid handle.
     let file = unsafe { std::fs::File::from_raw_handle(handle) };
 
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live handle and `information` is valid writable storage.
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
         return Err(std::io::Error::last_os_error())
             .with_context(|| format!("failed to inspect {path:?}"));
@@ -399,15 +461,22 @@ pub(crate) fn open_no_reparse(path: &Path, directory: bool, access: u32) -> Resu
 
 fn sid_to_string(sid: PSID) -> Result<String> {
     let mut value = std::ptr::null_mut();
+    // SAFETY: `sid` is a valid SID pointer and `value` receives a LocalAlloc-allocated NUL-terminated
+    // wide string freed by `LocalWideString`.
     if unsafe { ConvertSidToStringSidW(sid, &mut value) } == 0 || value.is_null() {
         return Err(std::io::Error::last_os_error()).context("failed to format process SID");
     }
     let value = LocalWideString(value);
     let length = (0..)
-        .take_while(|index| unsafe { *value.0.add(*index) } != 0)
+        .take_while(|index| {
+            // SAFETY: `value.0` is a NUL-terminated UTF-16 buffer allocated by
+            // `ConvertSidToStringSidW`, so stepping until the first NUL stays in bounds.
+            unsafe { *value.0.add(*index) != 0 }
+        })
         .count();
-    String::from_utf16(unsafe { std::slice::from_raw_parts(value.0, length) })
-        .context("process SID is not valid UTF-16")
+    // SAFETY: `value.0` points to `length` initialized `u16` elements valid while `value` lives.
+    let units = unsafe { std::slice::from_raw_parts(value.0, length) };
+    String::from_utf16(units).context("process SID is not valid UTF-16")
 }
 
 pub(crate) fn wide_path(path: &Path) -> Result<Vec<u16>> {
@@ -424,6 +493,7 @@ struct OwnedHandle(*mut c_void);
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            // SAFETY: `self.0` is an exclusively owned valid Windows handle closed once on drop.
             unsafe { CloseHandle(self.0) };
         }
     }
@@ -434,6 +504,7 @@ struct LocalWideString(*mut u16);
 impl Drop for LocalWideString {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: `self.0` was allocated by Windows (`ConvertSidToStringSidW`) and is freed once.
             unsafe { LocalFree(self.0.cast()) };
         }
     }
@@ -447,6 +518,8 @@ impl LocalSecurityDescriptor {
         let mut wide: Vec<u16> = sddl.encode_utf16().collect();
         wide.push(0);
         let mut descriptor = std::ptr::null_mut();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 SDDL string and `descriptor` receives a
+        // LocalAlloc-allocated security descriptor owned by `Self`.
         if unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
@@ -470,6 +543,7 @@ impl LocalSecurityDescriptor {
     pub(crate) fn owner(&self) -> Result<PSID> {
         let mut owner = std::ptr::null_mut();
         let mut defaulted = 0;
+        // SAFETY: `self.0` is a valid security descriptor and `owner`/`defaulted` are writable.
         if unsafe { GetSecurityDescriptorOwner(self.0, &mut owner, &mut defaulted) } == 0
             || owner.is_null()
         {
@@ -483,6 +557,7 @@ impl LocalSecurityDescriptor {
         let mut present = 0;
         let mut defaulted = 0;
         let mut dacl = std::ptr::null_mut();
+        // SAFETY: `self.0` is a valid security descriptor and all out-pointers are writable.
         if unsafe { GetSecurityDescriptorDacl(self.0, &mut present, &mut dacl, &mut defaulted) }
             == 0
             || present == 0
@@ -491,6 +566,8 @@ impl LocalSecurityDescriptor {
             return Err(std::io::Error::last_os_error())
                 .context("failed to read token descriptor DACL");
         }
+        // SAFETY: `handle` is an open object handle with `WRITE_DAC` access and `dacl` points to
+        // a valid `ACL` inside live `self.0`.
         let status = unsafe {
             SetSecurityInfo(
                 handle,
@@ -512,6 +589,8 @@ impl LocalSecurityDescriptor {
 impl Drop for LocalSecurityDescriptor {
     fn drop(&mut self) {
         if !self.0.is_null() {
+            // SAFETY: `self.0` was allocated by Windows (`GetSecurityInfo` or
+            // `ConvertStringSecurityDescriptorToSecurityDescriptorW`) and is freed once on drop.
             unsafe { LocalFree(self.0) };
         }
     }

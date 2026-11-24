@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,7 +69,7 @@ fn native_tray_menu_state_and_command_bindings_map_modes_profiles_groups_and_dir
     let commands = zenclash_ui::test_support::shell_tray::build_tray_menu_commands(&state).unwrap();
 
     #[cfg(target_os = "macos")]
-    let commands = HashMap::from([
+    let commands = std::collections::HashMap::from([
         ("id-show".to_owned(), TrayCommand::ShowWindow),
         ("id-rule".to_owned(), TrayCommand::SetRuleMode),
         ("id-global".to_owned(), TrayCommand::SetGlobalMode),
