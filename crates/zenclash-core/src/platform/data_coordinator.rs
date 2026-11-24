@@ -1,21 +1,27 @@
 //! Process-local coordination of persistent writes and whole-root restores.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fmt,
     path::{Component, Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
 use parking_lot::{Condvar, Mutex};
 
+const MAX_RECENT_EXCLUSIVE_RELEASES: usize = 256;
+
 #[derive(Default)]
 struct Coordinator {
     state: Mutex<LeaseState>,
     changed: Condvar,
+    /// Monotonically incremented under `state` whenever an exclusive lease is
+    /// released, allowing path resolution outside the mutex to detect
+    /// concurrent symlink or directory replacements before lease admission.
+    exclusive_releases: AtomicU64,
 }
 
 #[derive(Default)]
@@ -23,6 +29,36 @@ struct LeaseState {
     sequence: u64,
     active: Vec<LeaseRecord>,
     waiting_restores: Vec<LeaseRecord>,
+    recent_exclusive_releases: VecDeque<ReleasedExclusive>,
+}
+
+struct ReleasedExclusive {
+    epoch: u64,
+    paths: Vec<PathBuf>,
+}
+
+impl LeaseState {
+    fn exclusive_release_overlapped(
+        &self,
+        observed_epoch: u64,
+        current_epoch: u64,
+        paths: &[PathBuf],
+    ) -> bool {
+        if current_epoch == observed_epoch {
+            return false;
+        }
+        let Some(oldest) = self.recent_exclusive_releases.front() else {
+            return true;
+        };
+        if oldest.epoch > observed_epoch.saturating_add(1) {
+            return true;
+        }
+        self.recent_exclusive_releases
+            .iter()
+            .rev()
+            .take_while(|released| released.epoch > observed_epoch)
+            .any(|released| overlapping(paths, &released.paths))
+    }
 }
 
 struct LeaseRecord {
@@ -34,16 +70,31 @@ struct LeaseRecord {
 struct LeaseInner {
     id: u64,
     paths: Vec<PathBuf>,
+    exclusive: bool,
 }
 
 impl Drop for LeaseInner {
     fn drop(&mut self) {
         let coordinator = coordinator();
-        coordinator
-            .state
-            .lock()
-            .active
-            .retain(|lease| lease.id != self.id);
+        {
+            let mut state = coordinator.state.lock();
+            state.active.retain(|lease| lease.id != self.id);
+            if self.exclusive {
+                let epoch = coordinator
+                    .exclusive_releases
+                    .fetch_add(1, Ordering::Release)
+                    + 1;
+                if state.recent_exclusive_releases.len() >= MAX_RECENT_EXCLUSIVE_RELEASES {
+                    state.recent_exclusive_releases.pop_front();
+                }
+                state
+                    .recent_exclusive_releases
+                    .push_back(ReleasedExclusive {
+                        epoch,
+                        paths: std::mem::take(&mut self.paths),
+                    });
+            }
+        }
         coordinator.changed.notify_all();
     }
 }
@@ -363,9 +414,21 @@ fn coordinator() -> &'static Coordinator {
 
 fn acquire(paths: impl IntoIterator<Item = PathBuf>, exclusive: bool) -> DataWriteLease {
     let requested = paths.into_iter().collect::<Vec<_>>();
-    let mut paths = write_paths(&requested);
     let coordinator = coordinator();
+    let mut observed_epoch = coordinator.exclusive_releases.load(Ordering::Acquire);
+    let mut paths = write_paths(&requested);
     let mut state = coordinator.state.lock();
+    loop {
+        let current_epoch = coordinator.exclusive_releases.load(Ordering::Acquire);
+        if !state.exclusive_release_overlapped(observed_epoch, current_epoch, &paths) {
+            observed_epoch = current_epoch;
+            break;
+        }
+        observed_epoch = current_epoch;
+        drop(state);
+        paths = write_paths(&requested);
+        state = coordinator.state.lock();
+    }
     state.sequence += 1;
     let id = state.sequence;
     if exclusive {
@@ -375,33 +438,54 @@ fn acquire(paths: impl IntoIterator<Item = PathBuf>, exclusive: bool) -> DataWri
             exclusive,
         });
     }
+    let mut recheck_before_admit = false;
     loop {
-        let active_conflict = state
-            .active
-            .iter()
-            .any(|lease| (exclusive || lease.exclusive) && overlapping(&paths, &lease.paths));
-        let restore_precedes = state
-            .waiting_restores
-            .iter()
-            .any(|lease| (!exclusive || lease.id < id) && overlapping(&paths, &lease.paths));
-        if !active_conflict && !restore_precedes {
-            break;
+        let current_epoch = coordinator.exclusive_releases.load(Ordering::Acquire);
+        let overlapped_release =
+            state.exclusive_release_overlapped(observed_epoch, current_epoch, &paths);
+        observed_epoch = current_epoch;
+        let needs_resolve =
+            if overlapped_release {
+                true
+            } else {
+                let active_conflict = state.active.iter().any(|lease| {
+                    (exclusive || lease.exclusive) && overlapping(&paths, &lease.paths)
+                });
+                let restore_precedes = state.waiting_restores.iter().any(|lease| {
+                    (!exclusive || lease.id < id) && overlapping(&paths, &lease.paths)
+                });
+                if !active_conflict && !restore_precedes {
+                    if !recheck_before_admit {
+                        break;
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+        if needs_resolve {
+            // Release the global coordinator lock before performing filesystem
+            // canonicalize/read_link syscalls. A preceding restore may have replaced
+            // a symlinked directory before or while this operation waited; re-resolve
+            // its physical destination and recheck against the release history before
+            // admitting the lease.
+            drop(state);
+            paths = write_paths(&requested);
+            state = coordinator.state.lock();
+            recheck_before_admit = false;
+            if let Some(waiting) = state
+                .waiting_restores
+                .iter_mut()
+                .find(|lease| lease.id == id)
+                && waiting.paths != paths
+            {
+                waiting.paths.clone_from(&paths);
+                coordinator.changed.notify_all();
+            }
+            continue;
         }
         coordinator.changed.wait(&mut state);
-        // Release the global coordinator lock before performing filesystem
-        // canonicalize/read_link syscalls. A preceding restore may have replaced
-        // a symlinked directory while this operation waited; re-resolve its
-        // physical destination before checking conflicts again.
-        drop(state);
-        paths = write_paths(&requested);
-        state = coordinator.state.lock();
-        if let Some(waiting) = state
-            .waiting_restores
-            .iter_mut()
-            .find(|lease| lease.id == id)
-        {
-            waiting.paths.clone_from(&paths);
-        }
+        recheck_before_admit = true;
     }
     state.waiting_restores.retain(|lease| lease.id != id);
     state.active.push(LeaseRecord {
@@ -410,7 +494,11 @@ fn acquire(paths: impl IntoIterator<Item = PathBuf>, exclusive: bool) -> DataWri
         exclusive,
     });
     DataWriteLease {
-        inner: Arc::new(LeaseInner { id, paths }),
+        inner: Arc::new(LeaseInner {
+            id,
+            paths,
+            exclusive,
+        }),
         valid: Arc::new(AtomicBool::new(true)),
     }
 }
@@ -704,6 +792,150 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_waiting_writer_cannot_escape_symlink_replacement_under_concurrent_notifications() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("waiting-symlink-notify-race");
+        let data = root.join("data");
+        let first = root.join("first");
+        let second = root.join("second");
+        let unrelated_shared = root.join("unrelated-shared");
+        let unrelated_exclusive = root.join("unrelated-exclusive");
+        for directory in [
+            &data,
+            &first,
+            &second,
+            &unrelated_shared,
+            &unrelated_exclusive,
+        ] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let logical = data.join("store");
+        symlink(&first, &logical).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared_stop = Arc::clone(&stop);
+        let shared_noise = thread::spawn(move || {
+            while !shared_stop.load(Ordering::Relaxed) {
+                drop(DataWriteLease::shared([unrelated_shared.clone()]).unwrap());
+            }
+        });
+        let exclusive_stop = Arc::clone(&stop);
+        let exclusive_noise = thread::spawn(move || {
+            while !exclusive_stop.load(Ordering::Relaxed) {
+                drop(DataWriteLease::exclusive([unrelated_exclusive.clone()]));
+            }
+        });
+
+        let mut escaped = false;
+        for _ in 0..80 {
+            let _ = std::fs::remove_file(&logical);
+            symlink(&first, &logical).unwrap();
+            let access = DataWriteAccess::new(&logical);
+            let restoring_data = DataWriteLease::exclusive([data.clone()]);
+            let restoring_destination = DataWriteLease::exclusive([second.clone()]);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (admitted_tx, admitted_rx) = mpsc::channel();
+            let writer = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let _lease = access.acquire().unwrap();
+                admitted_tx.send(()).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            thread::sleep(Duration::from_millis(2));
+            std::fs::remove_file(&logical).unwrap();
+            symlink(&second, &logical).unwrap();
+            drop(restoring_data);
+            let after_replace = admitted_rx.recv_timeout(Duration::from_millis(10));
+            drop(restoring_destination);
+            if after_replace.is_ok() {
+                escaped = true;
+            } else {
+                admitted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            writer.join().unwrap();
+            if escaped {
+                break;
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        shared_noise.join().unwrap();
+        exclusive_noise.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            !escaped,
+            "writer was admitted with stale physical scope under concurrent coordinator notifications"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_waiting_restore_updates_its_physical_scope_and_unblocks_the_old_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("waiting-restore-symlink");
+        let data = root.join("data");
+        let first = root.join("first");
+        let second = root.join("second");
+        for directory in [&data, &first, &second] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let logical = data.join("store");
+        symlink(&first, &logical).unwrap();
+
+        let restoring_data = DataWriteLease::exclusive([data]);
+        let restoring_destination = DataWriteLease::exclusive([second.clone()]);
+        let (admitted_tx, admitted_rx) = mpsc::channel();
+        let waiting_logical = logical.clone();
+        let waiting_restore = thread::spawn(move || {
+            let _lease = DataWriteLease::exclusive([waiting_logical]);
+            admitted_tx.send(()).unwrap();
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !has_waiting_restore(&first) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting restore never registered its initial physical target"
+            );
+            thread::yield_now();
+        }
+
+        let (old_target_tx, old_target_rx) = mpsc::channel();
+        let old_target_writer = thread::spawn(move || {
+            let _lease = DataWriteLease::shared([first]).unwrap();
+            old_target_tx.send(()).unwrap();
+        });
+        assert!(matches!(
+            old_target_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        std::fs::remove_file(&logical).unwrap();
+        symlink(&second, &logical).unwrap();
+        drop(restoring_data);
+
+        // Once the root restore ends and `logical` points to `second`, the waiting
+        // restore must wait on `second` and stop blocking writers to `first`.
+        old_target_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        old_target_writer.join().unwrap();
+
+        let early_restore = admitted_rx.recv_timeout(Duration::from_millis(100));
+        drop(restoring_destination);
+        if early_restore.is_err() {
+            admitted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        waiting_restore.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            matches!(early_restore, Err(mpsc::RecvTimeoutError::Timeout)),
+            "waiting restore used its stale physical scope after the root restore ended"
+        );
+    }
+
     #[test]
     fn an_admitted_writer_finishes_after_parent_cancellation_with_a_restore_waiting() {
         let root = test_root("admitted-write");
@@ -771,13 +1003,15 @@ mod tests {
     }
 
     fn test_root(label: &str) -> PathBuf {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "zenclash-{label}-{}-{}",
+            "zenclash-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 }
