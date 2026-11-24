@@ -14,6 +14,7 @@ use crate::harness::wait_for_real_proxy_groups;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn proxy_catalog_preserves_subscription_group_and_member_order_across_reload() {
+    let _serial = crate::real_core_lock().await;
     let binary =
         PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
     // macOS's per-user temp directory plus the socket filename can exceed the

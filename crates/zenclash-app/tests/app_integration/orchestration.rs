@@ -120,9 +120,29 @@ async fn outbound_mode_parsing_serialization_and_coordinator_deduplication() {
 
     let temp = TempDir::new("outbound-mode");
     let controlled = ControlledConfigStore::new(temp.path().join("controlled"));
+    // Use a local rejecting listener instead of an unbound loopback port so
+    // Windows TCP SYN retries (~2s) never race the test timeout.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let controller_addr = listener.local_addr().unwrap();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut request_buf = [0_u8; 1024];
+            let _ = stream.read(&mut request_buf).await;
+            let _ = release_rx.await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            let _ = stream.shutdown().await;
+        }
+    });
     let session = CoreSession::open(
         CoreKind::Mihomo,
-        MihomoClient::new(MihomoEndpoint::new("http://127.0.0.1:1", "")).unwrap(),
+        MihomoClient::new(MihomoEndpoint::new(format!("http://{controller_addr}"), "")).unwrap(),
     )
     .unwrap();
 
@@ -158,6 +178,7 @@ async fn outbound_mode_parsing_serialization_and_coordinator_deduplication() {
     assert_eq!(coordinator.intent_generation(), 1);
     coordinator.synchronize(OutboundMode::Rule, 0);
     assert_ne!(coordinator.displayed(), OutboundMode::Rule);
+    let _ = release_tx.send(());
 
     tokio::time::timeout(Duration::from_secs(2), async {
         while coordinator.is_pending() {
@@ -166,7 +187,8 @@ async fn outbound_mode_parsing_serialization_and_coordinator_deduplication() {
     })
     .await
     .unwrap();
-    // Unreachable controller rolls back displayed mode to last confirmed state.
+    let _ = server.await;
+    // Failed controller update rolls back displayed mode to last confirmed state.
     assert_eq!(coordinator.displayed(), OutboundMode::Global);
     assert!(coordinator.error().is_some());
 }

@@ -32,6 +32,7 @@ use crate::{
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     use futures_util::StreamExt as _;
+    let _serial = crate::real_core_lock().await;
     let binary =
         PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
     let root = std::env::temp_dir().join(format!("zenclash-real-ipc-{}", std::process::id()));
@@ -136,6 +137,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY pointing to a real Mihomo executable"]
 async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
+    let _serial = crate::real_core_lock().await;
     let inputs = IntegrationInputs::from_env();
     inputs.seed_real_geodata();
     verify_real_ruleset_conversion(&inputs);

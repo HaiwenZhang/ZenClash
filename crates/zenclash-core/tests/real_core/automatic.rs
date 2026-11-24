@@ -74,6 +74,7 @@ impl Fixture {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY; starts an isolated real core"]
 async fn network_pause_does_not_trigger_crash_recovery_and_manual_stop_prevents_resume() {
+    let _serial = crate::real_core_lock().await;
     let fixture = Fixture::start("network").await;
     assert!(
         fixture
@@ -147,6 +148,7 @@ async fn network_pause_does_not_trigger_crash_recovery_and_manual_stop_prevents_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires ZENCLASH_MIHOMO_BINARY; starts an isolated real core"]
 async fn changed_source_restarts_once_and_rejected_source_preserves_the_live_process() {
+    let _serial = crate::real_core_lock().await;
     let fixture = Fixture::start("source").await;
     let before = fixture.process.snapshot().pid;
     let payload = std::fs::read_to_string(&fixture.source).unwrap();

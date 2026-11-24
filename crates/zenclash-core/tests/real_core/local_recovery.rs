@@ -33,6 +33,7 @@ enum ProviderInput {
 }
 
 async fn recover_with_real_mihomo(input: ProviderInput) {
+    let _serial = crate::real_core_lock().await;
     let source_binary = std::env::var_os("ZENCLASH_MIHOMO_BINARY")
         .expect("set ZENCLASH_MIHOMO_BINARY to an ordinary real Mihomo executable");
     let nonce = std::time::SystemTime::now()

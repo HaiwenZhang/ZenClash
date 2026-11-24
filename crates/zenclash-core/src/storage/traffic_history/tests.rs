@@ -71,7 +71,9 @@ fn entry(
     }
 }
 
-fn cleanup_database(path: &Path) {
+fn cleanup_database(store: TrafficHistoryStore, path: &Path) {
+    store.close_connection();
+    drop(store);
     for suffix in ["", "-shm", "-wal"] {
         let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
         if let Err(error) = fs::remove_file(&candidate) {
@@ -220,7 +222,7 @@ fn sqlite_store_supports_cleanup_overview_and_drill_down() {
         store.overview(&query).expect("empty overview").totals.total,
         0
     );
-    cleanup_database(&path);
+    cleanup_database(store, &path);
 }
 
 #[test]
@@ -238,7 +240,7 @@ fn sqlite_store_rejects_unbounded_trend_queries() {
         store.overview(&query),
         Err(TrafficHistoryError::InvalidQuery(_))
     ));
-    cleanup_database(&path);
+    cleanup_database(store, &path);
 }
 
 #[test]
@@ -295,7 +297,7 @@ fn overview_keeps_totals_rankings_and_trend_consistent_during_retention() {
         }
     }
     writes.join().unwrap();
-    cleanup_database(&path);
+    cleanup_database(store, &path);
     assert_eq!(
         inconsistent, None,
         "one overview must use one database snapshot"
@@ -361,7 +363,7 @@ fn historical_snapshot_includes_the_selected_drill_down_for_each_dimension() {
         assert_eq!(overview_only.overview, snapshot.overview);
         assert!(overview_only.details.is_empty() && overview_only.proxy_stats.is_empty());
     }
-    cleanup_database(&path);
+    cleanup_database(store, &path);
 }
 
 #[test]
@@ -387,7 +389,7 @@ fn historical_snapshot_preserves_empty_selected_labels() {
         .unwrap();
     assert_eq!(snapshot.details[0].label, "");
     assert_eq!(snapshot.proxy_stats[0].total, 18);
-    cleanup_database(&path);
+    cleanup_database(store, &path);
 }
 
 #[test]
@@ -478,7 +480,7 @@ fn historical_snapshot_remains_consistent_during_recording_cleanup_and_clear() {
         }
     }
     writes.join().unwrap();
-    cleanup_database(&path);
+    cleanup_database(store, &path);
     assert_eq!(
         inconsistent, None,
         "all selected history facts must use one snapshot"
@@ -557,5 +559,5 @@ fn sqlite_store_evicts_oldest_samples_at_the_global_budget() {
     store.insert_and_cleanup(&[], 2_000_000).unwrap();
     assert_eq!(store.overview(&query).unwrap().totals.samples, 2);
     drop(database);
-    cleanup_database(&path);
+    cleanup_database(store, &path);
 }

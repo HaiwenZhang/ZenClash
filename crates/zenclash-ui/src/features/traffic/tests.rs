@@ -335,6 +335,7 @@ fn clear_history_from_settings(cx: &mut gpui_kit::TestAppContext, fail: bool) {
             });
         });
         if fail {
+            history.close_connection();
             std::fs::remove_file(history.path()).unwrap();
             std::fs::create_dir(history.path()).unwrap();
         }
@@ -387,5 +388,6 @@ fn clear_history_from_settings(cx: &mut gpui_kit::TestAppContext, fail: bool) {
         .unwrap();
     status.stop();
     runtime.shutdown_timeout(Duration::from_secs(1));
+    history.close_connection();
     let _ = std::fs::remove_dir_all(directory);
 }

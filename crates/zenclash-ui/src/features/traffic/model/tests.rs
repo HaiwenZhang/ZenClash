@@ -60,6 +60,7 @@ impl HistoryFixture {
 
 impl Drop for HistoryFixture {
     fn drop(&mut self) {
+        self.store.close_connection();
         std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
