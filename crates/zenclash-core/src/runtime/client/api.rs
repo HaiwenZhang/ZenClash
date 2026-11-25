@@ -1,0 +1,947 @@
+use std::{collections::BTreeMap, path::Path, time::Duration};
+
+use reqwest::Method;
+use serde::Serialize;
+
+use super::{MihomoClient, MihomoError, MihomoResult, VersionInfo};
+use crate::{
+    ConnectionsSnapshot, ConnectionsSummary, DelayResult, DnsQueryResponse, DnsRecordType,
+    ProviderCatalog, ProxyCatalog, RuleCatalog, RuntimeConfig, TrafficAccountingSnapshot,
+    mihomo::proxy::RawProxyCatalog,
+    storage::profiles::{MAX_PROFILE_BYTES, read_profile_bytes},
+};
+
+const LONG_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_UPDATE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_HEALTHCHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const PROXY_DELAY_TIMEOUT_HEADROOM: Duration = Duration::from_secs(10);
+const GROUP_DELAY_TIMEOUT_HEADROOM: Duration = Duration::from_secs(30);
+const MIN_PROXY_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(15);
+const MIN_GROUP_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_DELAY_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn proxy_delay_transport_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms)
+        .saturating_add(PROXY_DELAY_TIMEOUT_HEADROOM)
+        .clamp(
+            MIN_PROXY_DELAY_TRANSPORT_TIMEOUT,
+            MAX_DELAY_TRANSPORT_TIMEOUT,
+        )
+}
+
+fn proxy_group_delay_transport_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms)
+        .saturating_add(GROUP_DELAY_TIMEOUT_HEADROOM)
+        .clamp(
+            MIN_GROUP_DELAY_TRANSPORT_TIMEOUT,
+            MAX_DELAY_TRANSPORT_TIMEOUT,
+        )
+}
+
+impl MihomoClient {
+    /// Reads one frame from the dedicated memory stream and releases the connection.
+    ///
+    /// # Errors
+    /// Returns a bounded timeout, transport failure, missing frame or JSON decoding error.
+    pub async fn memory_snapshot(&self) -> MihomoResult<crate::MemorySnapshot> {
+        self.stream_snapshot("/memory").await
+    }
+
+    pub(super) async fn stream_snapshot<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> MihomoResult<T> {
+        let binding = self.operation_binding()?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = self
+                .binding
+                .connect_pinned(&binding, path, &[], "Mihomo snapshot stream timed out")
+                .await
+                .map_err(MihomoError::Process)?;
+            while let Some(frame) = stream.next().await {
+                match frame.map_err(MihomoError::Process)? {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        return super::request::decode_response(path, text.as_bytes(), false);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                        return super::request::decode_response(path, &bytes, false);
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            Err(MihomoError::Process(
+                "Mihomo snapshot stream closed before reporting a value".into(),
+            ))
+        })
+        .await
+        .map_err(|_| MihomoError::Process("Mihomo snapshot stream timed out".into()))?
+    }
+    /// Fetches Mihomo core version information.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn version(&self) -> MihomoResult<VersionInfo> {
+        self.get_json("/version").await
+    }
+
+    /// Fetches the current typed runtime configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn runtime_config(&self) -> MihomoResult<RuntimeConfig> {
+        self.get_json("/configs").await
+    }
+
+    /// Fetches and resolves proxy nodes and selector groups.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn proxy_catalog(&self) -> MihomoResult<ProxyCatalog> {
+        let raw: RawProxyCatalog = self.get_json("/proxies").await?;
+        Ok(raw.into())
+    }
+
+    /// Selects a proxy node for a Mihomo selector group.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty names and propagates transport or API-status errors.
+    pub async fn change_proxy(&self, group: &str, proxy: &str) -> MihomoResult<()> {
+        require_non_empty(group, "代理组名称")?;
+        require_non_empty(proxy, "代理节点名称")?;
+        let path = format!("/proxies/{}", encode_path_segment(group));
+        self.put_json(&path, &serde_json::json!({ "name": proxy }))
+            .await
+    }
+
+    /// Reads the current member of one proxy group without materializing the
+    /// complete proxy catalog.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty group name and propagates transport, API-status or
+    /// response-decoding errors.
+    pub async fn proxy_group_selection(&self, group: &str) -> MihomoResult<String> {
+        Ok(self
+            .proxy_group_observation(group)
+            .await?
+            .member()
+            .to_owned())
+    }
+
+    /// Reads actual member and optional behavior for one controller group key.
+    ///
+    /// # Errors
+    /// Rejects an empty key and returns transport, API-status or decoding errors.
+    pub async fn proxy_group_observation(
+        &self,
+        group: &str,
+    ) -> MihomoResult<crate::ProxyGroupSelectionObservation> {
+        #[derive(serde::Deserialize)]
+        struct GroupSelection {
+            #[serde(default)]
+            now: String,
+            #[serde(default, rename = "type")]
+            kind: String,
+            #[serde(default, deserialize_with = "crate::mihomo::proxy::deserialize_fixed")]
+            fixed: bool,
+        }
+
+        require_non_empty(group, "代理组名称")?;
+        let path = format!("/proxies/{}", encode_path_segment(group));
+        let selection: GroupSelection = self.get_json(&path).await?;
+        let behavior = (!selection.kind.is_empty())
+            .then(|| crate::ProxyGroupBehavior::from_mihomo(&selection.kind, selection.fixed));
+        Ok(crate::ProxyGroupSelectionObservation::new(
+            selection.now,
+            behavior,
+        ))
+    }
+
+    pub(crate) async fn restore_proxy_group(&self, group: &str) -> MihomoResult<()> {
+        require_non_empty(group, "代理组名称")?;
+        let path = format!("/proxies/{}", encode_path_segment(group));
+        self.send_empty(Method::DELETE, &path).await
+    }
+
+    pub(crate) async fn proxy_group_delay(
+        &self,
+        group: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+    ) -> MihomoResult<BTreeMap<String, u32>> {
+        require_non_empty(group, "代理组名称")?;
+        if timeout_ms == 0 {
+            return Err(MihomoError::InvalidInput("延迟测试超时必须大于 0".into()));
+        }
+        let path = format!("/group/{}/delay", encode_path_segment(group));
+        let timeout = timeout_ms.to_string();
+        let url = validated_test_url(test_url)?;
+        self.send_api(
+            Method::GET,
+            &path,
+            &[("url", url.as_str()), ("timeout", timeout.as_str())],
+            None,
+            Some(proxy_group_delay_transport_timeout(timeout_ms)),
+        )
+        .await?
+        .json()
+        .await
+    }
+
+    /// Measures one proxy's delay through Mihomo.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty proxy names, zero timeouts and non-HTTP(S) test URLs, and
+    /// propagates transport, API-status or response-decoding errors.
+    pub async fn proxy_delay(
+        &self,
+        proxy: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+    ) -> MihomoResult<DelayResult> {
+        self.proxy_delay_with_provider(proxy, test_url, timeout_ms, None)
+            .await
+    }
+
+    /// Measures one proxy's delay, using Mihomo's provider health-check API
+    /// when the node originated from a proxy provider.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty proxy names, zero timeouts and non-HTTP(S) test URLs.
+    /// A blank optional provider is treated as absent. Transport, API-status
+    /// and response-decoding errors are propagated.
+    pub async fn proxy_delay_with_provider(
+        &self,
+        proxy: &str,
+        test_url: Option<&str>,
+        timeout_ms: u64,
+        provider: Option<&str>,
+    ) -> MihomoResult<DelayResult> {
+        require_non_empty(proxy, "代理节点名称")?;
+        if timeout_ms == 0 {
+            return Err(MihomoError::InvalidInput("延迟测试超时必须大于 0".into()));
+        }
+        let provider = provider.map(str::trim).filter(|name| !name.is_empty());
+        let path = if let Some(provider) = provider {
+            format!(
+                "/providers/proxies/{}/{}/healthcheck",
+                encode_path_segment(provider),
+                encode_path_segment(proxy)
+            )
+        } else {
+            format!("/proxies/{}/delay", encode_path_segment(proxy))
+        };
+        let timeout = timeout_ms.to_string();
+        let url = validated_test_url(test_url)?;
+        self.send_api(
+            Method::GET,
+            &path,
+            &[("url", url.as_str()), ("timeout", timeout.as_str())],
+            None,
+            Some(proxy_delay_transport_timeout(timeout_ms)),
+        )
+        .await?
+        .json()
+        .await
+    }
+
+    /// Fetches proxy-provider metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn proxy_provider_catalog(&self) -> MihomoResult<ProviderCatalog> {
+        self.get_json("/providers/proxies").await
+    }
+
+    /// Fetches the active ruleset.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn rule_catalog(&self) -> MihomoResult<RuleCatalog> {
+        self.get_json("/rules").await
+    }
+
+    /// Fetches rule-provider metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn rule_provider_catalog(&self) -> MihomoResult<ProviderCatalog> {
+        self.get_json("/providers/rules").await
+    }
+
+    /// Resolves one DNS record through Mihomo's configured resolver.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport, API-status or
+    /// response-decoding errors.
+    pub async fn dns_query(
+        &self,
+        name: &str,
+        record_type: DnsRecordType,
+    ) -> MihomoResult<DnsQueryResponse> {
+        require_non_empty(name, "DNS 查询名称")?;
+        self.send_api(
+            Method::GET,
+            "/dns/query",
+            &[("name", name.trim()), ("type", record_type.api_value())],
+            None,
+            None,
+        )
+        .await?
+        .json()
+        .await
+    }
+
+    /// Flushes Mihomo's regular DNS cache without changing fake-IP mappings.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors.
+    pub async fn flush_dns_cache(&self) -> MihomoResult<()> {
+        self.send_empty(Method::POST, "/cache/dns/flush").await
+    }
+
+    /// Flushes Mihomo's fake-IP cache without changing the regular DNS cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors.
+    pub async fn flush_fake_ip_cache(&self) -> MihomoResult<()> {
+        self.send_empty(Method::POST, "/cache/fakeip/flush").await
+    }
+
+    /// Fetches a connection snapshot shared across callers for up to one second.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn connections_snapshot(&self) -> MihomoResult<ConnectionsSnapshot> {
+        Ok(self.shared_connections().await?.as_ref().clone())
+    }
+
+    /// Derives aggregate counters from the shared connection snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn connections_summary(&self) -> MihomoResult<ConnectionsSummary> {
+        let snapshot = self.shared_connections().await?;
+        Ok(ConnectionsSummary {
+            active_connections: snapshot.connections.len(),
+            download_total: snapshot.download_total,
+            upload_total: snapshot.upload_total,
+            memory: snapshot.memory,
+        })
+    }
+
+    /// Derives accounting fields from the same snapshot used by live views.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport, API-status or response-decoding errors.
+    pub async fn traffic_accounting_snapshot(&self) -> MihomoResult<TrafficAccountingSnapshot> {
+        let snapshot = self.shared_connections().await?;
+        Ok(TrafficAccountingSnapshot {
+            download_total: snapshot.download_total,
+            upload_total: snapshot.upload_total,
+            connections: snapshot
+                .connections
+                .iter()
+                .map(|connection| crate::TrafficAccountingConnection {
+                    id: connection.id.clone(),
+                    metadata: crate::TrafficAccountingMetadata {
+                        source_ip: connection.metadata.source_ip.clone(),
+                        destination_ip: connection.metadata.destination_ip.clone(),
+                        host: connection.metadata.host.clone(),
+                        process: connection.metadata.process.clone(),
+                    },
+                    upload: connection.upload,
+                    download: connection.download,
+                    start: connection.start.clone(),
+                    outbound: connection.chains.first().cloned().unwrap_or_default(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Changes Mihomo's outbound mode to `rule`, `global` or `direct`.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsupported modes and propagates transport or API-status errors.
+    pub async fn set_mode(&self, mode: &str) -> MihomoResult<()> {
+        let mode = mode.trim().to_ascii_lowercase();
+        if !matches!(mode.as_str(), "rule" | "global" | "direct") {
+            return Err(MihomoError::InvalidInput(format!(
+                "不支持的出站模式：{mode}"
+            )));
+        }
+        self.patch_configs_verified(&serde_json::json!({ "mode": mode }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Applies a partial typed or JSON-compatible `/configs` update.
+    ///
+    /// # Errors
+    ///
+    /// Returns serialization, transport or API-status errors.
+    pub async fn patch_configs<T: Serialize + Sync + ?Sized>(&self, body: &T) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let body = serde_json::to_value(body)
+            .map_err(|error| MihomoError::InvalidInput(error.to_string()))?;
+        if let Some(process) = client.local_lease() {
+            crate::mihomo::tun::admission::ensure_local_patch(process.kind(), &body)?;
+        }
+        if client.runtime_session().is_some() {
+            let write_lease = client.acquire_write_lease().await?;
+            client.ensure_binding_current()?;
+            let client = match write_lease.as_ref() {
+                Some(lease) => client.with_write_lease(lease)?,
+                None => client,
+            };
+            let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+            client.ensure_binding_current()?;
+            // Admission is bounded by the existing data and controller gates. A cancelled
+            // caller cannot abandon an applied standalone patch before its commit.
+            return tokio::spawn(async move {
+                let runtime = client.runtime_session().ok_or(MihomoError::StaleBinding)?;
+                let prepared = runtime.prepare_patch(&body).await?;
+                PreparedConfig {
+                    client,
+                    prepared: PreparedConfigKind::Service(prepared),
+                    mutation_guard,
+                    write_lease,
+                }
+                .apply(false)
+                .await?
+                .commit()
+                .await
+            })
+            .await
+            .map_err(|_| MihomoError::Process("Service partial completion failed".into()))?;
+        }
+        client.patch_json("/configs", &body).await
+    }
+
+    /// Applies a JSON `/configs` patch and verifies that Mihomo reports the
+    /// requested values afterward.
+    ///
+    /// Mihomo returns success for some unsupported runtime fields while
+    /// silently keeping the previous configuration. UI controls should use
+    /// this method so an accepted HTTP response is not presented as an applied
+    /// setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the patch is not an object, the request or
+    /// readback fails, or the returned runtime configuration does not contain
+    /// the requested values.
+    pub async fn patch_configs_verified(
+        &self,
+        body: &serde_json::Value,
+    ) -> MihomoResult<RuntimeConfig> {
+        if !body.is_object() {
+            return Err(MihomoError::InvalidInput(
+                "运行时配置补丁必须是 JSON 对象".into(),
+            ));
+        }
+        let client = self.pin_binding()?;
+        client.patch_configs(body).await?;
+        let config = client.runtime_config().await.map_err(|error| {
+            if matches!(error, MihomoError::StaleBinding) {
+                MihomoError::StaleTransport
+            } else {
+                error
+            }
+        })?;
+        let actual = serde_json::to_value(&config).map_err(|error| {
+            MihomoError::Process(format!("无法验证 Mihomo 运行时配置：{error}"))
+        })?;
+        if !json_contains(&actual, body) {
+            return Err(MihomoError::Process(format!(
+                "Mihomo 接受了配置请求，但状态回读未应用：{body}"
+            )));
+        }
+        Ok(config)
+    }
+
+    /// Reads a UTF-8 YAML file asynchronously and asks Mihomo to reload it.
+    ///
+    /// # Errors
+    ///
+    /// Returns filesystem, validation, transport or API-status errors.
+    pub async fn reload_config(&self, path: impl AsRef<Path>, force: bool) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let path = path.as_ref().to_path_buf();
+        let display_path = path.display().to_string();
+        let payload = tokio::task::spawn_blocking(move || read_profile_bytes(&path))
+            .await
+            .map_err(|error| {
+                MihomoError::Process(format!("读取待重载配置的后台任务异常结束：{error}"))
+            })?
+            .map_err(|error| {
+                MihomoError::Process(format!("无法读取待重载配置 {display_path}：{error}"))
+            })?;
+        let payload = String::from_utf8(payload)
+            .map_err(|error| MihomoError::InvalidInput(format!("待重载配置不是 UTF-8：{error}")))?;
+        client.reload_payload(payload, force).await
+    }
+
+    /// Asks Mihomo to reload an in-memory YAML payload.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty payloads and propagates transport or API-status errors.
+    pub async fn reload_payload(
+        &self,
+        payload: impl Into<String>,
+        force: bool,
+    ) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let payload = client.normalize_config_payload(payload.into())?;
+        client.reload_exact_payload(payload, force).await
+    }
+
+    pub(crate) async fn reload_exact_payload(
+        &self,
+        payload: String,
+        force: bool,
+    ) -> MihomoResult<()> {
+        self.prepare_runtime_payload(payload)
+            .await?
+            .apply(force)
+            .await?
+            .commit()
+            .await
+    }
+
+    pub(crate) async fn prepare_runtime_payload(
+        &self,
+        payload: String,
+    ) -> MihomoResult<PreparedConfig> {
+        self.prepare_runtime(
+            payload,
+            None,
+            crate::runtime::launcher::RuntimeRestoreAuthority::Ordinary,
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_runtime_patch(
+        &self,
+        patch: &serde_json::Value,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        let runtime = client.runtime_session().ok_or_else(|| {
+            MihomoError::InvalidInput("Service partial runtime is unavailable".into())
+        })?;
+        let prepared = runtime.prepare_patch(patch).await?;
+        Ok(PreparedConfig {
+            client,
+            prepared: PreparedConfigKind::Service(prepared),
+            mutation_guard,
+            write_lease,
+        })
+    }
+
+    pub(crate) async fn prepare_saved_runtime(
+        &self,
+        payload: String,
+        bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
+        authority: crate::runtime::launcher::RuntimeRestoreAuthority,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        if client.service_client().is_some() && bundle.is_none() {
+            return Err(MihomoError::Process(
+                "No accepted service runtime snapshot".into(),
+            ));
+        }
+        client.prepare_runtime(payload, bundle, authority).await
+    }
+
+    async fn prepare_runtime(
+        &self,
+        payload: String,
+        bundle: Option<std::sync::Arc<crate::ServiceRuntimeBundle>>,
+        authority: crate::runtime::launcher::RuntimeRestoreAuthority,
+    ) -> MihomoResult<PreparedConfig> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        let mutation_guard = client.mutation_gate.clone().lock_owned().await;
+        client.ensure_binding_current()?;
+        let prepared = if let Some(runtime) = client.runtime_session() {
+            PreparedConfigKind::Service(match bundle {
+                Some(bundle) => runtime.prepare_restore(bundle, &authority).await?,
+                None => runtime.prepare(&payload).await?,
+            })
+        } else {
+            if let Some(process) = client.local_lease() {
+                crate::mihomo::tun::admission::ensure_local_yaml(process.kind(), &payload)?;
+            }
+            client.validate_config_payload_unlocked(&payload).await?;
+            PreparedConfigKind::Direct(payload)
+        };
+        Ok(PreparedConfig {
+            client,
+            prepared,
+            mutation_guard,
+            write_lease,
+        })
+    }
+
+    pub(crate) async fn validate_config_payload(&self, payload: &str) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.validate_config_payload_unlocked(payload).await
+    }
+
+    async fn validate_config_payload_unlocked(&self, payload: &str) -> MihomoResult<()> {
+        self.ensure_binding_current()?;
+        if payload.trim().is_empty() {
+            return Err(MihomoError::InvalidInput("重载配置内容不能为空".into()));
+        }
+        if payload.len() > MAX_PROFILE_BYTES {
+            return Err(MihomoError::InvalidInput(format!(
+                "重载配置超过 {} MiB 限制",
+                MAX_PROFILE_BYTES / 1024 / 1024
+            )));
+        }
+        if let Some(runtime) = self.runtime_session() {
+            let _validated = runtime.prepare(payload).await?;
+        } else if let Some(validator) = self.current_config_validator() {
+            let write_lease = validator
+                .acquire_write_lease()
+                .await
+                .map_err(MihomoError::Process)?;
+            let validator = validator.with_write_lease(&write_lease);
+            let validation_payload = payload.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let _write_lease = write_lease;
+                validator.validate_payload(&validation_payload)
+            })
+            .await
+            .map_err(|error| MihomoError::Process(format!("内核配置预检任务异常结束：{error}")))?
+            .map_err(|error| MihomoError::Process(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Closes one connection by ID.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty ID and propagates transport or API-status errors.
+    pub async fn close_connection(&self, id: &str) -> MihomoResult<()> {
+        require_non_empty(id, "连接 ID")?;
+        let path = format!("/connections/{}", encode_path_segment(id));
+        let result = self.send_empty(Method::DELETE, &path).await;
+        self.invalidate_connections();
+        result
+    }
+
+    /// Requests a proxy-provider refresh.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport or API-status errors.
+    pub async fn update_proxy_provider(&self, provider: &str) -> MihomoResult<()> {
+        require_non_empty(provider, "代理 Provider 名称")?;
+        let path = format!("/providers/proxies/{}", encode_path_segment(provider));
+        self.send_empty_with_timeout(Method::PUT, &path, PROVIDER_UPDATE_TIMEOUT)
+            .await
+    }
+
+    /// Requests an immediate health check for every node in a proxy provider.
+    ///
+    /// This operation is separate from downloading a new provider document.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport or API-status errors.
+    pub async fn healthcheck_proxy_provider(&self, provider: &str) -> MihomoResult<()> {
+        require_non_empty(provider, "代理 Provider 名称")?;
+        let path = format!(
+            "/providers/proxies/{}/healthcheck",
+            encode_path_segment(provider)
+        );
+        self.send_api(
+            Method::GET,
+            &path,
+            &[],
+            None,
+            Some(PROVIDER_HEALTHCHECK_TIMEOUT),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Requests a rule-provider refresh.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty name and propagates transport or API-status errors.
+    pub async fn update_rule_provider(&self, provider: &str) -> MihomoResult<()> {
+        require_non_empty(provider, "规则 Provider 名称")?;
+        let path = format!("/providers/rules/{}", encode_path_segment(provider));
+        self.send_empty_with_timeout(Method::PUT, &path, PROVIDER_UPDATE_TIMEOUT)
+            .await
+    }
+
+    /// Closes every active Mihomo connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors.
+    pub async fn close_all_connections(&self) -> MihomoResult<()> {
+        let result = self.send_empty(Method::DELETE, "/connections").await;
+        self.invalidate_connections();
+        result
+    }
+
+    /// Asks the running Mihomo core to download and install its latest release.
+    ///
+    /// The request uses a longer timeout because Mihomo performs the download
+    /// and replacement before acknowledging the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn upgrade_core(&self) -> MihomoResult<()> {
+        self.send_long_operation(Method::POST, "/upgrade").await
+    }
+
+    /// Asks Mihomo to refresh `GeoIP`, `GeoSite` and MMDB assets from `geox-url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn update_geodata(&self) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let write_lease = client.acquire_write_lease().await?;
+        client.ensure_binding_current()?;
+        let client = match write_lease.as_ref() {
+            Some(lease) => client.with_write_lease(lease)?,
+            None => client,
+        };
+        client
+            .send_long_operation(Method::POST, "/configs/geo")
+            .await
+    }
+
+    /// Asks Mihomo to refresh the configured external Web UI archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn update_external_ui(&self) -> MihomoResult<()> {
+        self.send_long_operation(Method::POST, "/upgrade/ui").await
+    }
+
+    /// Enables or disables one compiled rule by its runtime index and verifies
+    /// the state through a fresh `/rules` response.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors, or a verification error when
+    /// the running Mihomo build does not expose the requested indexed rule and
+    /// its mutable runtime state.
+    pub async fn set_rule_disabled(
+        &self,
+        index: usize,
+        disabled: bool,
+    ) -> MihomoResult<RuleCatalog> {
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.patch_rule_disabled(index, disabled).await?;
+        let catalog = client.rule_catalog().await?;
+        let verified = catalog.rules.iter().any(|rule| {
+            rule.index == Some(index)
+                && rule
+                    .extra
+                    .as_ref()
+                    .is_some_and(|extra| extra.disabled == disabled)
+        });
+        if !verified {
+            return Err(MihomoError::Process(format!(
+                "Mihomo 接受了规则状态请求，但规则 #{index} 的回读状态不匹配"
+            )));
+        }
+        Ok(catalog)
+    }
+
+    /// Enables or disables one compiled rule and returns after Mihomo acknowledges the patch.
+    ///
+    /// Interactive callers can update their local row immediately and reconcile the full rule
+    /// catalog separately, avoiding a long UI pending state while `/rules` is read back.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport or API-status errors reported by Mihomo.
+    pub async fn apply_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
+        let client = self.pin_binding()?;
+        let _mutation_guard = client.mutation_gate.lock().await;
+        client.patch_rule_disabled(index, disabled).await
+    }
+
+    async fn patch_rule_disabled(&self, index: usize, disabled: bool) -> MihomoResult<()> {
+        let body = serde_json::json!({index.to_string(): disabled});
+        self.send_api(Method::PATCH, "/rules/disable", &[], Some(body), None)
+            .await?;
+        Ok(())
+    }
+
+    async fn send_long_operation(&self, method: Method, path: &str) -> MihomoResult<()> {
+        self.send_empty_with_timeout(method, path, LONG_OPERATION_TIMEOUT)
+            .await
+    }
+}
+
+pub(crate) struct PreparedConfig {
+    client: MihomoClient,
+    prepared: PreparedConfigKind,
+    mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    write_lease: Option<crate::platform::data_coordinator::DataWriteLease>,
+}
+
+enum PreparedConfigKind {
+    Direct(String),
+    Service(crate::runtime::service::session::PreparedRuntime),
+}
+
+pub(crate) struct AppliedConfig {
+    client: MihomoClient,
+    service: Option<crate::runtime::service::session::AppliedRuntime>,
+    _mutation_guard: tokio::sync::OwnedMutexGuard<()>,
+    _write_lease: Option<crate::platform::data_coordinator::DataWriteLease>,
+}
+
+impl PreparedConfig {
+    pub(crate) fn effective_delta(&self) -> Option<serde_json::Value> {
+        match &self.prepared {
+            PreparedConfigKind::Service(prepared) => prepared.effective_delta().cloned(),
+            PreparedConfigKind::Direct(_) => None,
+        }
+    }
+    pub(crate) async fn apply(self, force: bool) -> MihomoResult<AppliedConfig> {
+        let service = match self.prepared {
+            PreparedConfigKind::Service(prepared) => Some(prepared.apply(force).await?),
+            PreparedConfigKind::Direct(payload) => {
+                self.client.send_runtime_payload(payload, force).await?;
+                None
+            }
+        };
+        Ok(AppliedConfig {
+            client: self.client,
+            service,
+            _mutation_guard: self.mutation_guard,
+            _write_lease: self.write_lease,
+        })
+    }
+}
+
+impl AppliedConfig {
+    pub(crate) async fn commit(self) -> MihomoResult<()> {
+        if let Some(service) = self.service {
+            service.commit().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn rollback(self, previous_payload: Option<String>) -> MihomoResult<()> {
+        if let Some(service) = self.service {
+            return service.rollback().await;
+        }
+        let payload = previous_payload.ok_or_else(|| {
+            MihomoError::Process(zenclash_i18n::text("backup.errors.no_runtime_snapshot"))
+        })?;
+        self.client
+            .validate_config_payload_unlocked(&payload)
+            .await?;
+        self.client.send_runtime_payload(payload, true).await
+    }
+}
+
+impl MihomoClient {
+    async fn send_runtime_payload(&self, payload: String, force: bool) -> MihomoResult<()> {
+        self.send_api(
+            Method::PUT,
+            "/configs",
+            &[("force", if force { "true" } else { "false" })],
+            Some(serde_json::json!({ "payload": payload })),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+fn require_non_empty(value: &str, label: &str) -> MihomoResult<()> {
+    if value.trim().is_empty() {
+        Err(MihomoError::InvalidInput(format!("{label}不能为空")))
+    } else {
+        Ok(())
+    }
+}
+
+fn json_contains(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match expected {
+        serde_json::Value::Object(expected) => actual.as_object().is_some_and(|actual| {
+            expected.iter().all(|(key, expected)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual| json_contains(actual, expected))
+            })
+        }),
+        _ => actual == expected,
+    }
+}
+
+fn validated_test_url(value: Option<&str>) -> MihomoResult<reqwest::Url> {
+    let value = value.unwrap_or("https://www.gstatic.com/generate_204");
+    let url = reqwest::Url::parse(value)
+        .map_err(|error| MihomoError::InvalidInput(format!("延迟测试 URL 无效：{error}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(MihomoError::InvalidInput(
+            "延迟测试 URL 仅支持 HTTP 或 HTTPS".into(),
+        ));
+    }
+    Ok(url)
+}
+
+pub(super) fn encode_path_segment(value: &str) -> String {
+    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+#[cfg(test)]
+mod tests;

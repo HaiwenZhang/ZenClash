@@ -9,9 +9,31 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Isolated UI integration test fixtures. Never enable for production packaging.
+test-support = [
+    "gpui-kit/test-support",
+    "zenclash-app/test-support",
+    "zenclash-core/test-support",
+]
+
 [[bin]]
 name = "zenclash"
 path = "src/main.rs"
+
+[[test]]
+name = "ui_components"
+path = "tests/ui_components/main.rs"
+
+[[test]]
+name = "ui_features"
+path = "tests/ui_features/main.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "ui_shell"
+path = "tests/ui_shell/main.rs"
+required-features = ["test-support"]
 
 [dependencies]
 chrono.workspace = true
@@ -24,7 +46,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tray-icon.workspace = true
-zenclash-core = { path = "../zenclash-core" }
+zenclash-app.workspace = true
+zenclash-core.workspace = true
 zenclash-i18n.workspace = true
 
 [build-dependencies]
@@ -61,7 +84,8 @@ objc2-foundation = { workspace = true, features = [
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-zenclash-core = { path = "../zenclash-core", features = ["test-support"] }
+zenclash-app = { workspace = true, features = ["test-support"] }
+zenclash-core = { workspace = true, features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # StatusNotifier activation emits primary clicks so they can restore the main window.

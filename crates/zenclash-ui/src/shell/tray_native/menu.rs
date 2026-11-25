@@ -1,0 +1,329 @@
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+use super::{EnvironmentShell, MAX_TRAY_PROXY_NODES, TrayCommand, TrayMenuState};
+
+static NEXT_MENU_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn select_profile_command(profile: &super::TrayProfile) -> TrayCommand {
+    TrayCommand::SelectProfile {
+        id: profile.id.clone(),
+    }
+}
+
+fn format_tray_delay(delay: Option<u32>) -> String {
+    match delay {
+        Some(0) => zenclash_i18n::text("tray.delay_timeout"),
+        Some(delay) => format!(" ({delay} ms)"),
+        None => String::new(),
+    }
+}
+
+struct MenuAssembler {
+    commands: HashMap<String, TrayCommand>,
+    generation: u64,
+    next_id: usize,
+}
+
+impl MenuAssembler {
+    fn new() -> Self {
+        Self {
+            commands: HashMap::new(),
+            generation: NEXT_MENU_GENERATION.fetch_add(1, Ordering::Relaxed),
+            next_id: 0,
+        }
+    }
+
+    fn register(&mut self, command: TrayCommand) -> String {
+        let id = format!("zenclash-tray-{}-{}", self.generation, self.next_id);
+        self.next_id += 1;
+        self.commands.insert(id.clone(), command);
+        id
+    }
+
+    fn item(&mut self, label: impl AsRef<str>, command: TrayCommand) -> MenuItem {
+        MenuItem::with_id(self.register(command), label, true, None)
+    }
+
+    fn check(
+        &mut self,
+        label: impl AsRef<str>,
+        checked: bool,
+        command: TrayCommand,
+    ) -> CheckMenuItem {
+        CheckMenuItem::with_id(self.register(command), label, true, checked, None)
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeping native tray item creation in menu order makes identifiers and submenu ownership auditable"
+)]
+pub(super) fn build_menu(
+    state: &TrayMenuState,
+) -> Result<(Menu, HashMap<String, TrayCommand>), String> {
+    let menu = Menu::new();
+    let mut builder = MenuAssembler::new();
+
+    let show_window = builder.item(
+        zenclash_i18n::text("tray.show_window"),
+        TrayCommand::ShowWindow,
+    );
+    let rule = builder.check(
+        zenclash_i18n::text("outbound_mode.rule_mode"),
+        state.mode.eq_ignore_ascii_case("rule"),
+        TrayCommand::SetRuleMode,
+    );
+    let global = builder.check(
+        zenclash_i18n::text("outbound_mode.global_mode"),
+        state.mode.eq_ignore_ascii_case("global"),
+        TrayCommand::SetGlobalMode,
+    );
+    let direct = builder.check(
+        zenclash_i18n::text("outbound_mode.direct_mode"),
+        state.mode.eq_ignore_ascii_case("direct"),
+        TrayCommand::SetDirectMode,
+    );
+    let separator_1 = PredefinedMenuItem::separator();
+    let system_proxy = builder.check(
+        zenclash_i18n::text("tray.system_proxy"),
+        state.system_proxy,
+        TrayCommand::SetSystemProxy {
+            enabled: !state.system_proxy,
+            port: state.mixed_port,
+        },
+    );
+    let tun = builder.check("TUN", state.tun, TrayCommand::SetTun(!state.tun));
+
+    menu.append_items(&[
+        &show_window,
+        &rule,
+        &global,
+        &direct,
+        &separator_1,
+        &system_proxy,
+        &tun,
+    ])
+    .map_err(|error| error.to_string())?;
+
+    if !state.groups.is_empty() {
+        let separator = PredefinedMenuItem::separator();
+        menu.append(&separator).map_err(|error| error.to_string())?;
+        for group in &state.groups {
+            let label = if group.now.is_empty() {
+                group.name.clone()
+            } else {
+                format!("{} · {}", group.name, group.now)
+            };
+            let submenu = Submenu::new(label, true);
+            let delay_test = builder.item(
+                zenclash_i18n::text("tray.test_group"),
+                TrayCommand::TestGroup {
+                    group: group.controller_name().to_owned(),
+                    automatic: group.automatic,
+                    test_url: group.test_url.clone(),
+                },
+            );
+            submenu
+                .append(&delay_test)
+                .map_err(|error| error.to_string())?;
+            if !group.selectable {
+                menu.append(&submenu).map_err(|error| error.to_string())?;
+                continue;
+            }
+            let items = proxy_menu_items(group);
+            if !items.is_empty() || group.has_more {
+                let separator = PredefinedMenuItem::separator();
+                submenu
+                    .append(&separator)
+                    .map_err(|error| error.to_string())?;
+            }
+            for proxy in items {
+                let delay = format_tray_delay(proxy.delay);
+                let item = builder.check(
+                    format!("{}{delay}", proxy.name),
+                    proxy.name == group.now,
+                    TrayCommand::SelectProxy {
+                        group: group.controller_name().to_owned(),
+                        proxy: proxy.name.clone(),
+                    },
+                );
+                submenu.append(&item).map_err(|error| error.to_string())?;
+            }
+            if group.has_more {
+                let separator = PredefinedMenuItem::separator();
+                let open_proxies = builder.item(
+                    zenclash_i18n::text("tray.open_proxies"),
+                    TrayCommand::OpenProxies,
+                );
+                submenu
+                    .append_items(&[&separator, &open_proxies])
+                    .map_err(|error| error.to_string())?;
+            }
+            menu.append(&submenu).map_err(|error| error.to_string())?;
+        }
+    }
+
+    let separator_2 = PredefinedMenuItem::separator();
+    menu.append(&separator_2)
+        .map_err(|error| error.to_string())?;
+    let profiles = Submenu::new(zenclash_i18n::text("tray.profiles"), true);
+    for profile in &state.profiles {
+        let item = builder.check(
+            &profile.name,
+            profile.active,
+            select_profile_command(profile),
+        );
+        profiles.append(&item).map_err(|error| error.to_string())?;
+    }
+    if state.profiles.is_empty() {
+        let current_profile = builder.check(
+            if state.profile_name.is_empty() {
+                zenclash_i18n::text("tray.current_profile")
+            } else {
+                state.profile_name.clone()
+            },
+            true,
+            TrayCommand::OpenProfiles,
+        );
+        profiles
+            .append(&current_profile)
+            .map_err(|error| error.to_string())?;
+    }
+    let profile_separator = PredefinedMenuItem::separator();
+    let open_profiles = builder.item(
+        zenclash_i18n::text("tray.open_profiles"),
+        TrayCommand::OpenProfiles,
+    );
+    profiles
+        .append_items(&[&profile_separator, &open_profiles])
+        .map_err(|error| error.to_string())?;
+    menu.append(&profiles).map_err(|error| error.to_string())?;
+
+    if !state.directories.is_empty() {
+        let directories = Submenu::new(zenclash_i18n::text("tray.open_directories"), true);
+        for (label, path) in &state.directories {
+            let item = builder.item(label, TrayCommand::OpenDirectory(path.clone()));
+            directories
+                .append(&item)
+                .map_err(|error| error.to_string())?;
+        }
+        menu.append(&directories)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if state.mixed_port > 0 {
+        let copy_environment = Submenu::new(zenclash_i18n::text("tray.copy_environment"), true);
+        for shell in EnvironmentShell::ALL {
+            let item = builder.item(
+                shell.label(),
+                TrayCommand::CopyEnvironment {
+                    port: state.mixed_port,
+                    shell,
+                },
+            );
+            copy_environment
+                .append(&item)
+                .map_err(|error| error.to_string())?;
+        }
+        menu.append(&copy_environment)
+            .map_err(|error| error.to_string())?;
+    }
+
+    let separator_3 = PredefinedMenuItem::separator();
+    let restart = builder.item(zenclash_i18n::text("tray.restart"), TrayCommand::Restart);
+    let quit = builder.item(zenclash_i18n::text("tray.quit"), TrayCommand::Quit);
+    menu.append_items(&[&separator_3, &restart, &quit])
+        .map_err(|error| error.to_string())?;
+
+    Ok((menu, builder.commands))
+}
+
+fn proxy_menu_items(group: &super::TrayProxyGroup) -> Vec<&super::TrayProxyNode> {
+    let mut proxies = group
+        .proxies
+        .iter()
+        .take(MAX_TRAY_PROXY_NODES)
+        .collect::<Vec<_>>();
+    if proxies.iter().any(|proxy| proxy.name == group.now) {
+        return proxies;
+    }
+    let Some(current) = group.proxies.iter().find(|proxy| proxy.name == group.now) else {
+        return proxies;
+    };
+    if let Some(last) = proxies.last_mut() {
+        *last = current;
+    } else {
+        proxies.push(current);
+    }
+    proxies
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_registration_produces_unique_ids() {
+        let mut builder = MenuAssembler::new();
+
+        let first = builder.register(TrayCommand::ShowWindow);
+        let second = builder.register(TrayCommand::Quit);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn menu_rebuild_uses_a_new_identifier_generation() {
+        let first = MenuAssembler::new().register(TrayCommand::ShowWindow);
+        let second = MenuAssembler::new().register(TrayCommand::ShowWindow);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn delay_formatting_uses_ascii_parentheses_without_hardcoded_fullwidth_punctuation() {
+        assert_eq!(format_tray_delay(Some(42)), " (42 ms)");
+        assert_eq!(format_tray_delay(None), "");
+        assert!(!format_tray_delay(Some(42)).contains('（'));
+        assert!(!format_tray_delay(Some(42)).contains('）'));
+    }
+
+    #[test]
+    fn profile_entries_create_real_selection_commands() {
+        let profile = super::super::TrayProfile {
+            id: "airport".into(),
+            name: "主订阅".into(),
+            active: true,
+        };
+
+        let command = select_profile_command(&profile);
+
+        assert!(matches!(command, TrayCommand::SelectProfile { id } if id == "airport"));
+    }
+
+    #[test]
+    fn large_proxy_group_keeps_the_current_node_inside_the_bounded_native_menu() {
+        let group = super::super::TrayProxyGroup {
+            selectable: true,
+            now: "node-29".into(),
+            proxies: (0..30)
+                .map(|index| super::super::TrayProxyNode {
+                    name: format!("node-{index}"),
+                    ..super::super::TrayProxyNode::default()
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            ..super::super::TrayProxyGroup::default()
+        };
+
+        let items = proxy_menu_items(&group);
+
+        assert_eq!(items.len(), MAX_TRAY_PROXY_NODES);
+        assert!(items.iter().any(|proxy| proxy.name == group.now));
+    }
+}

@@ -72,6 +72,80 @@ fn update_and_autostart_error_details_resolve_in_both_languages() {
     }
 }
 
+/// Dynamic key prefixes resolved through `format!` at runtime rather than
+/// full literal keys.
+///
+/// - `ai_network.`: formatted as `format!("ai_network.{key}")` in
+///   `zenclash-core/src/ai_network.rs` and `zenclash-ui/src/pages/runtime/network/ai.rs`.
+/// - `navigation.`: destination titles formatted as
+///   `format!("navigation.{}.title", self.route())` in `zenclash-ui/src/pages.rs`.
+const DYNAMIC_KEY_PREFIXES: &[&str] = &["ai_network.", "navigation."];
+
+/// Domain terms explicitly forbidden by `CONTEXT.md` in `zh-CN` copy:
+/// - `当前配置` -> `有效配置`
+/// - `临时内核` / `内置内核` / `后台内核` -> `托管内核`
+const FORBIDDEN_ZH_CN_TERMS: &[&str] = &["当前配置", "临时内核", "内置内核", "后台内核"];
+
+#[test]
+fn zh_cn_translations_avoid_context_forbidden_terms() {
+    let entries = load_catalog_entries();
+    assert!(!entries.is_empty(), "expected non-empty locale catalog");
+
+    let mut violations = Vec::new();
+    for (key, (zh_cn, _)) in entries {
+        for forbidden in FORBIDDEN_ZH_CN_TERMS {
+            if zh_cn.contains(forbidden) {
+                violations.push(format!(
+                    "{key}: contains forbidden term `{forbidden}` -> {zh_cn}"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "CONTEXT.md forbidden terms found in zh-CN locale copy:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn catalog_contains_no_dead_translation_keys() {
+    let catalog = load_catalog();
+    assert!(!catalog.is_empty(), "expected non-empty locale catalog");
+
+    let mut referenced_literals = BTreeSet::new();
+    for file in rust_sources() {
+        if file.file_name() == Some(OsStr::new("key_usage.rs")) {
+            continue;
+        }
+        let source = fs::read_to_string(&file).expect("Rust source should be readable");
+        collect_all_string_literals(&source, &mut referenced_literals);
+    }
+
+    assert!(
+        !referenced_literals.is_empty(),
+        "the scanner found no string literals across crates/"
+    );
+
+    let dead_keys = catalog
+        .into_iter()
+        .filter(|key| {
+            !referenced_literals.contains(key)
+                && !DYNAMIC_KEY_PREFIXES
+                    .iter()
+                    .any(|prefix| key.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        dead_keys.is_empty(),
+        "unreferenced dead translation keys found in locales/*.yml ({}):\n{}",
+        dead_keys.len(),
+        dead_keys.join("\n")
+    );
+}
+
 fn is_cjk(character: char) -> bool {
     matches!(character, '\u{3400}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
 }
@@ -84,8 +158,12 @@ fn placeholders(text: &str) -> BTreeSet<&str> {
 }
 
 fn load_catalog() -> BTreeSet<String> {
+    load_catalog_entries().into_keys().collect()
+}
+
+fn load_catalog_entries() -> BTreeMap<String, (String, String)> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
-    let mut keys = BTreeSet::new();
+    let mut entries_map = BTreeMap::new();
     let entries = fs::read_dir(&directory).expect("locale directory should be readable");
     for entry in entries {
         let path = entry.expect("locale entry should be readable").path();
@@ -94,35 +172,63 @@ fn load_catalog() -> BTreeSet<String> {
         }
         let text = fs::read_to_string(&path).expect("locale file should be readable");
         let document: Value = serde_yaml::from_str(&text).expect("locale YAML should parse");
-        collect_keys(&document, &mut Vec::new(), &mut keys);
+        collect_entries(&document, &mut Vec::new(), &mut entries_map);
     }
-    keys
+    entries_map
 }
 
-fn collect_keys(value: &Value, prefix: &mut Vec<String>, keys: &mut BTreeSet<String>) {
+fn collect_entries(
+    value: &Value,
+    prefix: &mut Vec<String>,
+    entries: &mut BTreeMap<String, (String, String)>,
+) {
     let Some(mapping) = value.as_mapping() else {
         return;
     };
-    let mut has_zh = false;
-    let mut has_en = false;
+    let mut zh = None;
+    let mut en = None;
     for (key, value) in mapping {
         match key.as_str() {
-            Some("zh-CN") if value.is_string() => has_zh = true,
-            Some("en") if value.is_string() => has_en = true,
+            Some("zh-CN") => zh = value.as_str().map(str::to_owned),
+            Some("en") => en = value.as_str().map(str::to_owned),
             _ => {}
         }
     }
-    if has_zh && has_en {
-        keys.insert(prefix.join("."));
+    if let (Some(zh), Some(en)) = (zh, en) {
+        entries.insert(prefix.join("."), (zh, en));
         return;
     }
     for (key, child) in mapping {
         let Some(key) = key.as_str() else {
             continue;
         };
+        if key == "_version" {
+            continue;
+        }
         prefix.push(key.to_owned());
-        collect_keys(child, prefix, keys);
+        collect_entries(child, prefix, entries);
         prefix.pop();
+    }
+}
+
+fn collect_all_string_literals(source: &str, literals: &mut BTreeSet<String>) {
+    let tokens: TokenStream = source.parse().expect("Rust source should tokenize");
+    collect_string_literals_from_stream(tokens, literals);
+}
+
+fn collect_string_literals_from_stream(stream: TokenStream, literals: &mut BTreeSet<String>) {
+    for token in stream {
+        match token {
+            TokenTree::Group(group) => {
+                collect_string_literals_from_stream(group.stream(), literals);
+            }
+            TokenTree::Literal(literal) => {
+                if let Ok(parsed) = syn::parse_str::<syn::LitStr>(&literal.to_string()) {
+                    literals.insert(parsed.value());
+                }
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+        }
     }
 }
 

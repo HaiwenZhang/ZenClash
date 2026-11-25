@@ -12,9 +12,11 @@ use gpui_kit::{
 };
 
 use crate::{
-    app::{SetDarkTheme, SetLightTheme, ToggleSidebar},
-    assets::{AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH},
-    pages::Page,
+    design::online_indicator,
+    foundation::actions::{Page, SetDarkTheme, SetLightTheme, ToggleSidebar},
+    foundation::assets::{
+        AppIcon, GROUP_ICON_PATH, RADIO_ICON_PATH, RSS_ICON_PATH, RULER_ICON_PATH,
+    },
 };
 
 pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> Option<String> {
@@ -37,7 +39,6 @@ pub(crate) fn runtime_uptime(process: Option<&zenclash_core::ProcessStatus>) -> 
     ))
 }
 
-use crate::app::navigation::dispatch_navigate;
 /// Compatibility path for application outbound routing modes.
 pub use crate::outbound_mode::OutboundMode;
 
@@ -153,8 +154,8 @@ impl RenderOnce for SidebarNavigation {
                                 this.child(div().min_w_0().text_ellipsis().child(page.label()))
                             }),
                     )
-                    .tooltip(page.label())
-                    .on_click(move |_, window, cx| dispatch_navigate(page, window, cx))
+                    .when(self.collapsed, |this| this.tooltip(page.label()))
+                    .on_click(move |_, window, cx| page.dispatch_navigate(window, cx))
             }))
     }
 }
@@ -174,9 +175,10 @@ impl RenderOnce for Sidebar {
         } else {
             "sidebar.collapse"
         });
+        let (appearance_icon, appearance_label) = appearance_toggle_copy(dark);
 
         GpuiSidebar::new("main-sidebar")
-            .w(rems(9.))
+            .w(rems(13.))
             .collapsible(true)
             .collapsed(self.collapsed)
             .header(
@@ -190,7 +192,7 @@ impl RenderOnce for Sidebar {
                                 .gap_2()
                                 .min_w_0()
                                 .child(
-                                    gpui_kit::img(crate::assets::ZENCLASH_LOGO_PATH)
+                                    gpui_kit::img(crate::foundation::assets::ZENCLASH_LOGO_PATH)
                                         .size_5()
                                         .flex_shrink_0(),
                                 )
@@ -242,33 +244,17 @@ impl RenderOnce for Sidebar {
                                             .size(rems(1.25))
                                             .flex_shrink_0()
                                             .child(
-                                                Icon::new(if dark {
-                                                    IconName::Moon
-                                                } else {
-                                                    IconName::Sun
-                                                })
-                                                .size(rems(1.25))
-                                                .flex_shrink_0(),
+                                                Icon::new(appearance_icon)
+                                                    .size(rems(1.25))
+                                                    .flex_shrink_0(),
                                             ),
                                     )
                                     .when(!self.collapsed, |this| {
-                                        this.child(zenclash_i18n::text(if dark {
-                                            "settings.appearance.dark"
-                                        } else {
-                                            "settings.appearance.light"
-                                        }))
+                                        this.child(appearance_label.clone())
                                     }),
                             )
-                            .accessibility_label(zenclash_i18n::text(if dark {
-                                "settings.appearance.light"
-                            } else {
-                                "settings.appearance.dark"
-                            }))
-                            .tooltip(zenclash_i18n::text(if dark {
-                                "settings.appearance.light"
-                            } else {
-                                "settings.appearance.dark"
-                            }))
+                            .accessibility_label(appearance_label.clone())
+                            .when(self.collapsed, |button| button.tooltip(appearance_label))
                             .on_click(move |_, window, cx| {
                                 if dark {
                                     window.dispatch_action(Box::new(SetLightTheme), cx);
@@ -287,11 +273,7 @@ impl RenderOnce for Sidebar {
                                 .gap_3()
                                 .child(div().size_2p5().flex_shrink_0().rounded_full().bg(
                                     if connected {
-                                        if self.current_page.is_settings() {
-                                            theme.success
-                                        } else {
-                                            theme.chart_3
-                                        }
+                                        online_indicator(theme)
                                     } else {
                                         theme.muted_foreground
                                     },
@@ -304,11 +286,9 @@ impl RenderOnce for Sidebar {
                                             .child(
                                                 div()
                                                     .text_sm()
-                                                    .when(
-                                                        !self.current_page.is_settings()
-                                                            && connected,
-                                                        |label| label.text_color(theme.primary),
-                                                    )
+                                                    .when(connected, |label| {
+                                                        label.text_color(theme.primary)
+                                                    })
                                                     .child(core),
                                             )
                                             .child(
@@ -322,6 +302,20 @@ impl RenderOnce for Sidebar {
                         )
                     }),
             )
+    }
+}
+
+fn appearance_toggle_copy(dark: bool) -> (IconName, String) {
+    if dark {
+        (
+            IconName::Sun,
+            zenclash_i18n::text("settings.appearance.light"),
+        )
+    } else {
+        (
+            IconName::Moon,
+            zenclash_i18n::text("settings.appearance.dark"),
+        )
     }
 }
 
@@ -346,142 +340,4 @@ const fn sidebar_icon_path(page: Page) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{
-        assets::{GROUP_ICON_PATH, RADIO_ICON_PATH, RULER_ICON_PATH},
-        pages::Page,
-    };
-
-    use super::{Sidebar, sidebar_icon_path};
-
-    #[gpui_kit::test]
-    fn collapsed_navigation_keeps_accessible_names_and_keyboard_navigation(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
-        use gpui_kit::component::{Collapsible as _, Root};
-        use gpui_kit::test::TestWindowExt;
-        use gpui_kit::{
-            AppContext, Context, FocusHandle, InteractiveElement, IntoElement, ParentElement,
-            Render, Styled, div, px, size,
-        };
-        struct Navigation {
-            focus: FocusHandle,
-            navigated: bool,
-        }
-        impl Render for Navigation {
-            fn render(
-                &mut self,
-                _: &mut gpui_kit::Window,
-                cx: &mut Context<Self>,
-            ) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .track_focus(&self.focus)
-                    .on_action(cx.listener(|this, _: &crate::app::NavigateRules, _, cx| {
-                        this.navigated = true;
-                        cx.notify();
-                    }))
-                    .child(
-                        super::SidebarNavigation::new(Page::Home, [Page::Home, Page::Rules])
-                            .collapsed(true),
-                    )
-            }
-        }
-        cx.update(gpui_kit::init);
-        let mut view = None;
-        let handle = cx.open_window(size(px(200.), px(200.)), |window, cx| {
-            let navigation = cx.new(|cx| Navigation {
-                focus: cx.focus_handle(),
-                navigated: false,
-            });
-            view = Some(navigation.clone());
-            Root::new(navigation, window, cx)
-        });
-        cx.update_window(handle.into(), |_, window, cx| {
-            let view = view.as_ref().unwrap();
-            window.render_frame(cx);
-            assert_eq!(
-                window.find(Page::Rules.route()).label(),
-                Some(Page::Rules.label().as_str())
-            );
-            let focus = view.read(cx).focus.clone();
-            window.focus(&focus, cx);
-            for _ in 0..4 {
-                if window.find(Page::Rules.route()).focused() == Some(true) {
-                    break;
-                }
-                window.press("tab", cx);
-            }
-            assert_eq!(window.find(Page::Rules.route()).focused(), Some(true));
-            window.press("enter", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert!(cx.update(|cx| view.as_ref().unwrap().read(cx).navigated));
-        cx.update_window(handle.into(), |_, window, _| window.remove_window())
-            .unwrap();
-    }
-
-    #[test]
-    fn sidebar_defaults_to_expanded_and_accepts_collapsed_state() {
-        assert!(!Sidebar::new(Page::Home).collapsed);
-        assert!(Sidebar::new(Page::Home).collapsed(true).collapsed);
-    }
-
-    #[gpui_kit::test]
-    fn collapsed_sidebar_preserves_full_icon_bounds(cx: &mut gpui_kit::TestAppContext) {
-        use gpui_kit::component::Root;
-        use gpui_kit::test::TestWindowExt;
-        use gpui_kit::{
-            AppContext, Context, IntoElement, ParentElement, Render, Styled, div, px, size,
-        };
-        struct Navigation;
-        impl Render for Navigation {
-            fn render(
-                &mut self,
-                _: &mut gpui_kit::Window,
-                _: &mut Context<Self>,
-            ) -> impl IntoElement {
-                div()
-                    .size_full()
-                    .child(Sidebar::new(Page::Home).collapsed(true))
-            }
-        }
-        cx.update(gpui_kit::init);
-        let handle = cx.open_window(size(px(200.), px(700.)), |window, cx| {
-            let view = cx.new(|_| Navigation);
-            Root::new(view, window, cx)
-        });
-        cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
-            for page in std::iter::once(Page::Home)
-                .chain(Page::PRIMARY)
-                .chain([Page::Settings])
-            {
-                let icon = window
-                    .find(format!("sidebar-icon:{}", page.route()))
-                    .bounds();
-                let button = window.find(page.route()).bounds();
-                assert_eq!(
-                    icon.size.width,
-                    gpui_kit::rems(1.25).to_pixels(window.rem_size())
-                );
-                assert!(
-                    icon.left() >= button.left() && icon.right() <= button.right(),
-                    "{} icon exceeds its button",
-                    page.route()
-                );
-            }
-            window.remove_window();
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn sidebar_uses_requested_custom_icons() {
-        assert_eq!(sidebar_icon_path(Page::Proxies), Some(GROUP_ICON_PATH));
-        assert_eq!(sidebar_icon_path(Page::Connections), Some(RADIO_ICON_PATH));
-        assert_eq!(sidebar_icon_path(Page::Rules), Some(RULER_ICON_PATH));
-        assert_eq!(sidebar_icon_path(Page::Home), None);
-    }
-}
+mod tests;

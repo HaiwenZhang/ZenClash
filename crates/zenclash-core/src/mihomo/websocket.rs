@@ -1,0 +1,253 @@
+use std::time::Duration;
+
+use http::{HeaderValue, header::AUTHORIZATION};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{
+        client::IntoClientRequest, handshake::client::Request, protocol::WebSocketConfig,
+    },
+};
+
+use crate::MihomoEndpoint;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LOG_STREAM_MAX_BYTES: usize = 128 * 1024;
+const DEFAULT_STREAM_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Bounded exponential reconnect delay shared by the traffic and log streams.
+#[derive(Default)]
+pub(crate) struct ReconnectBackoff {
+    attempt: u8,
+}
+
+impl ReconnectBackoff {
+    pub(crate) fn reset(&mut self) {
+        self.attempt = 0;
+    }
+
+    pub(crate) fn next_delay(&mut self) -> Duration {
+        let mut random = [0_u8; 2];
+        let _ = getrandom::fill(&mut random);
+        self.delay_with_jitter(u16::from_ne_bytes(random))
+    }
+
+    fn delay_with_jitter(&mut self, jitter: u16) -> Duration {
+        let base = 1_000_u64 << self.attempt.min(4);
+        self.attempt = self.attempt.saturating_add(1);
+        Duration::from_millis((base + u64::from(jitter) % (base / 4 + 1)).min(20_000))
+    }
+}
+
+pub type MihomoSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub async fn connect_stream(
+    endpoint: &MihomoEndpoint,
+    path: &str,
+    query: &[(&str, &str)],
+    timeout_message: &str,
+) -> Result<MihomoSocket, String> {
+    let request = stream_request(endpoint, path, query)?;
+    let max_bytes = if path == "/logs" {
+        LOG_STREAM_MAX_BYTES
+    } else {
+        DEFAULT_STREAM_MAX_BYTES
+    };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(max_bytes))
+        .max_frame_size(Some(max_bytes));
+    tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        connect_async_with_config(request, Some(config), false),
+    )
+    .await
+    .map_err(|_| timeout_message.to_owned())?
+    .map(|(socket, _)| socket)
+    .map_err(|error| error.to_string())
+}
+
+fn stream_request(
+    endpoint: &MihomoEndpoint,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Request, String> {
+    let websocket_url = endpoint
+        .websocket_url(path)
+        .map_err(|error| error.to_string())?;
+    let mut url = reqwest::Url::parse(&websocket_url).map_err(|error| error.to_string())?;
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query.iter().copied());
+    }
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+    if !endpoint.secret.is_empty() {
+        let value = HeaderValue::from_str(&format!("Bearer {}", endpoint.secret))
+            .map_err(|_| "invalid Mihomo authorization header".to_owned())?;
+        request.headers_mut().insert(AUTHORIZATION, value);
+    }
+    Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{
+        Message,
+        protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        },
+    };
+
+    use super::*;
+
+    async fn socket_fixture(
+        path: &str,
+        messages: Vec<Message>,
+    ) -> (MihomoSocket, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint =
+            MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for message in messages {
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let socket = connect_stream(&endpoint, path, &[], "fixture timed out")
+            .await
+            .unwrap();
+        (socket, server)
+    }
+
+    async fn log_socket_fixture(
+        messages: Vec<Message>,
+    ) -> (MihomoSocket, tokio::task::JoinHandle<()>) {
+        socket_fixture("/logs", messages).await
+    }
+
+    #[tokio::test]
+    async fn non_log_socket_accepts_a_legal_frame_and_rejects_one_above_4_mib() {
+        let legal = r#"{"up":128,"down":256}"#;
+        let (mut socket, server) = socket_fixture(
+            "/traffic",
+            vec![
+                Message::Text(legal.into()),
+                Message::Binary(vec![b'x'; DEFAULT_STREAM_MAX_BYTES + 1].into()),
+            ],
+        )
+        .await;
+
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.into_text().unwrap(), legal);
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_socket_accepts_a_legal_frame_and_rejects_one_above_128_kib() {
+        let legal = r#"{"type":"info","payload":"legal frame"}"#;
+        let (mut socket, server) = log_socket_fixture(vec![
+            Message::Text(legal.into()),
+            Message::Binary(vec![b'x'; 128 * 1024 + 1].into()),
+        ])
+        .await;
+
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.into_text().unwrap(), legal);
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_socket_rejects_a_large_message_split_into_legal_sized_frames() {
+        let (mut socket, server) = log_socket_fixture(vec![
+            Message::Frame(Frame::message(
+                vec![b'x'; 80 * 1024],
+                OpCode::Data(Data::Text),
+                false,
+            )),
+            Message::Frame(Frame::message(
+                vec![b'x'; 80 * 1024],
+                OpCode::Data(Data::Continue),
+                true,
+            )),
+        ])
+        .await;
+
+        let oversized = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            oversized,
+            Err(tokio_tungstenite::tungstenite::Error::Capacity(_))
+        ));
+        drop(socket);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn reconnect_delay_grows_is_bounded_and_resets_after_data() {
+        let mut backoff = ReconnectBackoff::default();
+        assert_eq!(backoff.delay_with_jitter(0), Duration::from_secs(1));
+        assert_eq!(backoff.delay_with_jitter(0), Duration::from_secs(2));
+        for _ in 0..100 {
+            assert!(backoff.delay_with_jitter(u16::MAX) <= Duration::from_secs(20));
+        }
+        backoff.reset();
+        assert_eq!(backoff.delay_with_jitter(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stream_request_encodes_query_and_applies_bearer_secret() {
+        let endpoint = MihomoEndpoint::new("http://127.0.0.1:9090/base", "top-secret");
+
+        let request = stream_request(&endpoint, "/logs", &[("level", "info / debug")]).unwrap();
+
+        assert_eq!(
+            request.uri().to_string(),
+            "ws://127.0.0.1:9090/base/logs?level=info+%2F+debug"
+        );
+        assert_eq!(request.headers()[AUTHORIZATION], "Bearer top-secret");
+    }
+
+    #[test]
+    fn stream_request_rejects_secret_that_is_not_a_header_value() {
+        let endpoint = MihomoEndpoint::new("http://127.0.0.1:9090", "bad\nsecret");
+
+        let error = stream_request(&endpoint, "/traffic", &[]).unwrap_err();
+
+        assert_eq!(error, "invalid Mihomo authorization header");
+    }
+}

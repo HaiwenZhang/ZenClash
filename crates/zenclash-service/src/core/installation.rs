@@ -7,7 +7,23 @@ use crate::core::{
     paths::service_paths,
 };
 use crate::{CoreAvailability, CoreInspection, CoreRequirement, InstallationStatus, ProtocolInfo};
+use sha2::{Digest as _, Sha256};
+use std::io::Read as _;
 use std::path::Path;
+
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let size = file.read(&mut buffer)?;
+        if size == 0 {
+            break;
+        }
+        hash.update(&buffer[..size]);
+    }
+    Ok(hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
 
 pub(super) async fn inspect(
     requirements: &[CoreRequirement],
@@ -36,7 +52,7 @@ pub(super) async fn inspect(
             .collect();
         Ok(InstallationStatus {
             service_sha256: if include_service_digest {
-                crate::management::sha256_file(&std::env::current_exe()?)?
+                sha256_file(&std::env::current_exe()?)?
             } else {
                 String::new()
             },
@@ -70,7 +86,7 @@ fn inspect_core(directory: &Path, required: &CoreRequirement) -> CoreAvailabilit
                 expected.len() == 64 && expected.bytes().all(|c| c.is_ascii_hexdigit()),
                 "invalid SHA-256"
             );
-            if crate::management::sha256_file(&approved)? != expected.to_ascii_lowercase() {
+            if sha256_file(&approved)? != expected.to_ascii_lowercase() {
                 return Ok(CoreAvailability::DigestMismatch);
             }
         }

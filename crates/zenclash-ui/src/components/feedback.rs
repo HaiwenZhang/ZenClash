@@ -1,23 +1,31 @@
 use gpui_kit::component::{WindowExt, notification::Notification};
 use gpui_kit::{Anchor, App, Window};
 
+/// Semantic severity level for a workspace toast notification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FeedbackKind {
+pub enum FeedbackKind {
+    /// Informational notice.
     Info,
+    /// Completed action confirmation.
     Success,
+    /// Non-fatal caution or degraded state.
     Warning,
+    /// Failure or rejected action.
     Error,
 }
 
+/// One active feedback entry associated with a stable source key.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Feedback {
+pub struct Feedback {
     source: &'static str,
     kind: FeedbackKind,
     message: String,
 }
 
 impl Feedback {
-    pub(crate) fn new(source: &'static str, kind: FeedbackKind, message: String) -> Self {
+    /// Constructs a feedback entry for `source` with the given severity and message.
+    #[must_use]
+    pub fn new(source: &'static str, kind: FeedbackKind, message: String) -> Self {
         Self {
             source,
             kind,
@@ -28,12 +36,14 @@ impl Feedback {
 
 /// Tracks current feedback episodes; a resolved message can be reported again.
 #[derive(Default)]
-pub(crate) struct FeedbackNotifications {
+pub struct FeedbackNotifications {
     active: Vec<Feedback>,
 }
 
 impl FeedbackNotifications {
-    pub(crate) fn current_message(&self, source: &'static str) -> Option<String> {
+    /// Returns the currently active message for `source`, if any.
+    #[must_use]
+    pub fn current_message(&self, source: &'static str) -> Option<String> {
         self.active
             .iter()
             .find(|feedback| feedback.source == source)
@@ -54,7 +64,8 @@ impl FeedbackNotifications {
         changed
     }
 
-    pub(crate) fn publish(&mut self, current: Vec<Feedback>, window: &mut Window, cx: &mut App) {
+    /// Publishes newly introduced or changed feedback entries as deduplicated notifications.
+    pub fn publish(&mut self, current: Vec<Feedback>, window: &mut Window, cx: &mut App) {
         for feedback in self.changed(current) {
             let notification = match feedback.kind {
                 FeedbackKind::Info => Notification::info(feedback.message),

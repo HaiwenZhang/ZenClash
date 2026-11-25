@@ -241,7 +241,19 @@ impl PreparedCores {
 /// # Errors
 /// Returns source validation, preparation, native authorization or installer-process errors; partial maintenance may have occurred.
 pub fn prepare_install_if_requested() -> Result<bool> {
-    let mut arguments = std::env::args_os().skip(1);
+    prepare_install_if_requested_with_args(std::env::args_os().skip(1))
+}
+
+/// Variant of [`prepare_install_if_requested`] accepting explicit arguments (e.g. after stripping an `install` subcommand).
+#[cfg(feature = "client")]
+///
+/// # Errors
+/// Returns source validation, preparation, native authorization or installer-process errors; partial maintenance may have occurred.
+pub fn prepare_install_if_requested_with_args<I>(arguments: I) -> Result<bool>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut arguments = arguments.into_iter();
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--prepare-install")) {
         return Ok(false);
     }
@@ -322,14 +334,22 @@ pub fn prepare_install_if_requested() -> Result<bool> {
         arguments
     };
     // Both executables must be beside each other; a temporary copy also avoids macOS TCC paths.
-    let staged_installer = staging.0.join(installer.file_name().context("installer has no name")?);
+    let installer_name = installer.file_name().context("installer has no name")?;
+    let service_name = service.file_name().context("service has no name")?;
+    let unified_binary = installer_name == service_name;
+    let staged_installer = staging.0.join(installer_name);
     std::fs::copy(&installer, &staged_installer)?;
-    if !core_only {
-        std::fs::copy(
-            &service,
-            staging.0.join(service.file_name().context("service has no name")?),
-        )?;
+    if !core_only && !unified_binary {
+        std::fs::copy(&service, staging.0.join(service_name))?;
     }
+    let elevated = if unified_binary {
+        let mut with_subcommand = Vec::with_capacity(elevated.len() + 1);
+        with_subcommand.push(OsString::from("install"));
+        with_subcommand.extend(elevated);
+        with_subcommand
+    } else {
+        elevated
+    };
     #[cfg(unix)]
     elevate(&staged_installer, &elevated, gid, &prompt)?;
     #[cfg(windows)]
@@ -372,46 +392,188 @@ fn shell_quote(value: &std::ffi::OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// Classification of a `pkexec` invocation on Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PkexecOutcome {
+    /// Privileged command exited with code 0.
+    Succeeded,
+    /// Exit code 126: user cancelled/dismissed authentication; do not retry with `sudo`.
+    CancelledByUser,
+    /// Exit code 127 or missing `pkexec`: no polkit agent available; fall back to `sudo -n` -> `sudo -S`.
+    FallbackToSudo,
+    /// Privileged command ran and failed with a non-fallback exit status.
+    Failed(Option<i32>),
+}
+
+/// Classification of a non-interactive `sudo -n` attempt on Linux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SudoNonInteractiveOutcome {
+    /// Privileged command exited with code 0.
+    Succeeded,
+    /// `sudo -n` failed because interactive password authentication is required; fall back to `sudo -S`.
+    FallbackToSudoStdin,
+    /// `sudo` executable is not installed on the system.
+    Unavailable,
+    /// Privileged command ran via `sudo -n` and failed with a real installer error.
+    Failed(Option<i32>),
+}
+
+/// Classifies a `pkexec` spawn/exit outcome according to polkit exit-code semantics.
+pub fn classify_pkexec_outcome(result: &std::io::Result<Option<i32>>) -> PkexecOutcome {
+    match result {
+        Ok(Some(0)) => PkexecOutcome::Succeeded,
+        Ok(Some(126)) => PkexecOutcome::CancelledByUser,
+        Ok(Some(127)) => PkexecOutcome::FallbackToSudo,
+        Ok(code) => PkexecOutcome::Failed(*code),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => PkexecOutcome::FallbackToSudo,
+        Err(_) => PkexecOutcome::Failed(None),
+    }
+}
+
+/// Classifies a `sudo -n` outcome to distinguish password-required fallback from real command failures.
+pub fn classify_sudo_non_interactive_outcome(
+    result: &std::io::Result<(Option<i32>, String)>,
+) -> SudoNonInteractiveOutcome {
+    match result {
+        Ok((Some(0), _)) => SudoNonInteractiveOutcome::Succeeded,
+        Ok((Some(1), stderr)) => {
+            let lower = stderr.to_ascii_lowercase();
+            if lower.trim().is_empty()
+                || lower.contains("password")
+                || lower.contains("askpass")
+                || lower.contains("terminal")
+            {
+                SudoNonInteractiveOutcome::FallbackToSudoStdin
+            } else {
+                SudoNonInteractiveOutcome::Failed(Some(1))
+            }
+        }
+        Ok((code, _)) => SudoNonInteractiveOutcome::Failed(*code),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SudoNonInteractiveOutcome::Unavailable,
+        Err(_) => SudoNonInteractiveOutcome::Failed(None),
+    }
+}
+
+#[cfg(any(all(unix, not(target_os = "macos"), feature = "client"), test))]
+fn run_linux_elevation_chain_with(
+    mut run_pkexec: impl FnMut() -> std::io::Result<Option<i32>>,
+    mut run_sudo_non_interactive: impl FnMut() -> std::io::Result<(Option<i32>, String)>,
+    mut run_sudo_stdin: impl FnMut() -> std::io::Result<Option<i32>>,
+) -> Result<()> {
+    match classify_pkexec_outcome(&run_pkexec()) {
+        PkexecOutcome::Succeeded => return Ok(()),
+        PkexecOutcome::CancelledByUser => {
+            bail!("privilege elevation cancelled by user (pkexec exit code 126)");
+        }
+        PkexecOutcome::Failed(code) => {
+            bail!("elevated installer via pkexec failed with exit code {code:?}");
+        }
+        PkexecOutcome::FallbackToSudo => {}
+    }
+
+    match classify_sudo_non_interactive_outcome(&run_sudo_non_interactive()) {
+        SudoNonInteractiveOutcome::Succeeded => return Ok(()),
+        SudoNonInteractiveOutcome::Unavailable => {
+            bail!("neither pkexec nor sudo is available for privilege elevation");
+        }
+        SudoNonInteractiveOutcome::Failed(code) => {
+            bail!("elevated installer via sudo -n failed with exit code {code:?}");
+        }
+        SudoNonInteractiveOutcome::FallbackToSudoStdin => {}
+    }
+
+    match run_sudo_stdin() {
+        Ok(Some(0)) => Ok(()),
+        Ok(code) => bail!("elevated installer via sudo -S failed with exit code {code:?}"),
+        Err(error) => Err(error).context("failed to execute sudo -S for privilege elevation"),
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos"), feature = "client"))]
+fn elevate_linux(installer: &Path, arguments: &[OsString]) -> Result<()> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    run_linux_elevation_chain_with(
+        || {
+            Command::new("pkexec")
+                .arg(installer)
+                .args(arguments)
+                .status()
+                .map(|status| status.code())
+        },
+        || {
+            let output = Command::new("sudo")
+                .arg("-n")
+                .arg("--")
+                .arg(installer)
+                .args(arguments)
+                .output()?;
+            Ok((
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        },
+        || {
+            if let Ok(password) = std::env::var("ZENCLASH_SUDO_PASSWORD") {
+                let mut child = Command::new("sudo")
+                    .args(["-S", "-p", "", "--"])
+                    .arg(installer)
+                    .args(arguments)
+                    .env_remove("ZENCLASH_SUDO_PASSWORD")
+                    .stdin(Stdio::piped())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(password.as_bytes());
+                    let _ = stdin.write_all(b"\n");
+                }
+                child.wait().map(|status| status.code())
+            } else {
+                Command::new("sudo")
+                    .args(["-S", "-p", "", "--"])
+                    .arg(installer)
+                    .args(arguments)
+                    .status()
+                    .map(|status| status.code())
+            }
+        },
+    )
+}
+
 #[cfg(all(unix, feature = "client"))]
 fn elevate(installer: &Path, arguments: &[OsString], gid: u32, prompt: &str) -> Result<()> {
     // SAFETY: `geteuid` has no preconditions or memory effects.
-    let status = if unsafe { platform_lib::geteuid() } == 0 {
-        Command::new(installer)
+    if unsafe { platform_lib::geteuid() } == 0 {
+        let status = Command::new(installer)
             .args(arguments)
             .env("ZENCLASH_SERVICE_GID", gid.to_string())
-            .status()?
-    } else {
-        #[cfg(target_os = "macos")]
-        {
-            let mut shell = format!(
-                "cd /; ZENCLASH_SERVICE_GID={gid} {}",
-                shell_quote(installer.as_os_str())
-            );
-            for argument in arguments {
-                shell.push(' ');
-                shell.push_str(&shell_quote(argument));
-            }
-            let script = "on run argv\ndo shell script (item 1 of argv) with administrator privileges with prompt (item 2 of argv)\nend run";
-            Command::new("osascript")
-                .args(["-e", script, &shell, prompt])
-                .status()?
+            .status()?;
+        anyhow::ensure!(status.success(), "elevated installer failed with {status}");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut shell = format!(
+            "cd /; ZENCLASH_SERVICE_GID={gid} {}",
+            shell_quote(installer.as_os_str())
+        );
+        for argument in arguments {
+            shell.push(' ');
+            shell.push_str(&shell_quote(argument));
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = prompt;
-            match Command::new("pkexec").arg(installer).args(arguments).status() {
-                Ok(status) if status.code() == Some(127) => {
-                    Command::new("sudo").arg(installer).args(arguments).status()?
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Command::new("sudo").arg(installer).args(arguments).status()?
-                }
-                result => result?,
-            }
-        }
-    };
-    anyhow::ensure!(status.success(), "elevated installer failed with {status}");
-    Ok(())
+        let script = "on run argv\ndo shell script (item 1 of argv) with administrator privileges with prompt (item 2 of argv)\nend run";
+        let status = Command::new("osascript")
+            .args(["-e", script, &shell, prompt])
+            .status()?;
+        anyhow::ensure!(status.success(), "elevated installer failed with {status}");
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = prompt;
+        elevate_linux(installer, arguments)
+    }
 }
 
 #[cfg(all(windows, feature = "client"))]
@@ -668,5 +830,103 @@ mod tests {
         assert_eq!(shell_quote(std::ffi::OsStr::new("a'b $HOME")), "'a'\\''b $HOME'");
         assert_eq!(windows_quote(r#"C:\core's path\"#), r#""C:\core's path\\""#);
         assert_eq!(windows_quote(r#"a"b"#), r#""a\"b""#);
+    }
+
+    #[test]
+    fn linux_pkexec_exit_codes_classify_cancel_fallback_and_failure() {
+        assert_eq!(classify_pkexec_outcome(&Ok(Some(0))), PkexecOutcome::Succeeded);
+        assert_eq!(classify_pkexec_outcome(&Ok(Some(126))), PkexecOutcome::CancelledByUser);
+        assert_eq!(classify_pkexec_outcome(&Ok(Some(127))), PkexecOutcome::FallbackToSudo);
+        assert_eq!(
+            classify_pkexec_outcome(&Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "pkexec not found"
+            ))),
+            PkexecOutcome::FallbackToSudo
+        );
+        assert_eq!(classify_pkexec_outcome(&Ok(Some(1))), PkexecOutcome::Failed(Some(1)));
+        assert_eq!(classify_pkexec_outcome(&Ok(Some(75))), PkexecOutcome::Failed(Some(75)));
+    }
+
+    #[test]
+    fn linux_elevation_stops_on_pkexec_user_cancel_126() {
+        let called = std::cell::RefCell::new(Vec::new());
+        let error = run_linux_elevation_chain_with(
+            || {
+                called.borrow_mut().push("pkexec");
+                Ok(Some(126))
+            },
+            || {
+                called.borrow_mut().push("sudo-n");
+                Ok((Some(0), String::new()))
+            },
+            || {
+                called.borrow_mut().push("sudo-S");
+                Ok(Some(0))
+            },
+        )
+        .expect_err("exit code 126 must stop retrying");
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(*called.borrow(), ["pkexec"]);
+    }
+
+    #[test]
+    fn linux_elevation_falls_back_pkexec_127_to_sudo_n_and_then_sudo_s() -> Result<()> {
+        // Case 1: pkexec 127 -> sudo -n succeeds (does not call sudo -S).
+        let calls = std::cell::RefCell::new(Vec::new());
+        run_linux_elevation_chain_with(
+            || {
+                calls.borrow_mut().push("pkexec");
+                Ok(Some(127))
+            },
+            || {
+                calls.borrow_mut().push("sudo-n");
+                Ok((Some(0), String::new()))
+            },
+            || {
+                calls.borrow_mut().push("sudo-S");
+                Ok(Some(0))
+            },
+        )?;
+        assert_eq!(*calls.borrow(), ["pkexec", "sudo-n"]);
+
+        // Case 2: missing pkexec -> sudo -n requires password -> sudo -S succeeds.
+        let calls = std::cell::RefCell::new(Vec::new());
+        run_linux_elevation_chain_with(
+            || {
+                calls.borrow_mut().push("pkexec");
+                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+            },
+            || {
+                calls.borrow_mut().push("sudo-n");
+                Ok((Some(1), "sudo: a password is required\n".to_owned()))
+            },
+            || {
+                calls.borrow_mut().push("sudo-S");
+                Ok(Some(0))
+            },
+        )?;
+        assert_eq!(*calls.borrow(), ["pkexec", "sudo-n", "sudo-S"]);
+
+        // Case 3: sudo -n executes installer which exits with repair-in-progress (75) -> stop!
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = run_linux_elevation_chain_with(
+            || {
+                calls.borrow_mut().push("pkexec");
+                Ok(Some(127))
+            },
+            || {
+                calls.borrow_mut().push("sudo-n");
+                Ok((Some(75), "Service repair is already in progress".to_owned()))
+            },
+            || {
+                calls.borrow_mut().push("sudo-S");
+                Ok(Some(0))
+            },
+        )
+        .expect_err("real installer failure under sudo -n must not retry via sudo -S");
+        assert!(error.to_string().contains("sudo -n"));
+        assert_eq!(*calls.borrow(), ["pkexec", "sudo-n"]);
+        Ok(())
     }
 }

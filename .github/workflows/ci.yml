@@ -104,7 +104,7 @@ jobs:
           ZENCLASH_MIHOMO_BINARY: ${{ runner.temp }}/mihomo
           ZENCLASH_INTEGRATION_HOME: ${{ runner.temp }}/mihomo-home
           ZENCLASH_CONFIG: ${{ runner.temp }}/real-profile.yaml
-        run: cargo test --locked --all-features -p zenclash-core --test real_mihomo -- --ignored --nocapture
+        run: cargo test --locked --all-features -p zenclash-core --test real_core -- --ignored --nocapture
 
       - name: Prepare optional private integration profile
         id: private_profile
@@ -130,8 +130,8 @@ jobs:
           ZENCLASH_INTEGRATION_HOME: ${{ runner.temp }}/mihomo-private-home
           ZENCLASH_CONFIG: ${{ runner.temp }}/private-profile.yaml
         run: >-
-          cargo test --locked --all-features -p zenclash-core --test real_mihomo
-          drives_the_supplied_profile_through_a_real_mihomo_process --
+          cargo test --locked --all-features -p zenclash-core --test real_core
+          lifecycle::drives_the_supplied_profile_through_a_real_mihomo_process --
           --exact --ignored --nocapture
 
       - name: Build Ubuntu amd64 Debian package

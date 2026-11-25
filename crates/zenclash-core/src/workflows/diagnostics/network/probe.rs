@@ -1,0 +1,659 @@
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use serde_json::Value;
+
+use crate::mihomo::network_types::normalize_http_url;
+pub use crate::mihomo::network_types::{
+    DEFAULT_NETWORK_LATENCY_TARGETS, NetworkLatencyTarget, NetworkProbeError, NetworkProbeResult,
+    PublicIpProvider,
+};
+
+const IP_RESPONSE_LIMIT: usize = 256 * 1024;
+const LATENCY_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
+const MAX_LATENCY_TARGETS: usize = DEFAULT_NETWORK_LATENCY_TARGETS.len() + 13;
+
+/// Route used for public network diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum NetworkProbeRoute {
+    /// Connect without an HTTP proxy, including ambient environment/system proxies.
+    /// Operating-system routing, including an active TUN, still applies.
+    #[default]
+    Direct,
+    /// Send HTTP and HTTPS diagnostics through a local Mihomo HTTP endpoint.
+    MihomoHttp {
+        /// Listener host, normally loopback.
+        host: String,
+        /// HTTP or mixed listener port.
+        port: u16,
+    },
+}
+
+impl NetworkProbeRoute {
+    /// Human-readable route shown beside diagnostic results.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Direct => "直连".into(),
+            Self::MihomoHttp { host, port } => format!("Mihomo {host}:{port}"),
+        }
+    }
+
+    pub(crate) fn http_proxy_url(&self) -> Option<String> {
+        match self {
+            Self::Direct => None,
+            Self::MihomoHttp { host, port } => Some(format_http_proxy_url(host, *port)),
+        }
+    }
+}
+
+fn format_http_proxy_url(host: &str, port: u16) -> String {
+    let host = host.trim();
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
+/// Normalized public address and location returned by a supported provider.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PublicIpInfo {
+    /// Public IPv4 or IPv6 address.
+    pub ip: String,
+    /// Country display name.
+    pub country: Option<String>,
+    /// ISO 3166-1 alpha-2 country code.
+    pub country_code: Option<String>,
+    /// First-level administrative region.
+    pub region: Option<String>,
+    /// City name.
+    pub city: Option<String>,
+    /// Autonomous-system number.
+    pub asn: Option<u64>,
+    /// Autonomous-system organization.
+    pub organization: Option<String>,
+    /// Internet service provider.
+    pub isp: Option<String>,
+    /// Provider-reported proxy status.
+    pub is_proxy: Option<bool>,
+    /// Provider-reported VPN status.
+    pub is_vpn: Option<bool>,
+    /// IANA time-zone identifier.
+    pub timezone: Option<String>,
+    /// Approximate latitude.
+    pub latitude: Option<f64>,
+    /// Approximate longitude.
+    pub longitude: Option<f64>,
+}
+
+/// Result for one independent latency endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkLatencyResult {
+    /// Target that was measured.
+    pub target: NetworkLatencyTarget,
+    /// End-to-end HTTP duration, absent after a failure.
+    pub latency_ms: Option<u64>,
+    /// Bounded error text for this target only.
+    pub error: Option<String>,
+}
+
+/// Public-IP and latency results produced by one refresh.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NetworkProbeSnapshot {
+    /// Route actually used for all requests.
+    pub route: String,
+    /// IP information when the selected provider succeeded.
+    pub public_ip: Option<PublicIpInfo>,
+    /// Provider failure without discarding latency results.
+    pub public_ip_error: Option<String>,
+    /// Independent latency endpoint results.
+    pub latencies: Vec<NetworkLatencyResult>,
+}
+
+impl NetworkProbeSnapshot {
+    /// Returns whether the public-IP request or at least one latency probe succeeded.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.public_ip.is_some()
+            || self
+                .latencies
+                .iter()
+                .any(|result| result.latency_ms.is_some())
+    }
+}
+
+/// Cloneable HTTP diagnostics client with fixed route and bounded timeouts.
+#[derive(Clone)]
+pub struct NetworkProbeService {
+    route: NetworkProbeRoute,
+    http: reqwest::Client,
+}
+
+impl NetworkProbeService {
+    /// Creates a diagnostics client for a direct or local-Mihomo route.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the proxy route is invalid or the HTTP client
+    /// cannot be constructed.
+    pub fn new(route: NetworkProbeRoute) -> NetworkProbeResult<Self> {
+        Self::with_timeouts(route, Duration::from_secs(5), Duration::from_secs(10))
+    }
+
+    fn with_timeouts(
+        route: NetworkProbeRoute,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> NetworkProbeResult<Self> {
+        let mut builder = reqwest::Client::builder()
+            // Diagnostic routes are explicit; inherited proxies cannot select a path.
+            .no_proxy()
+            .user_agent(concat!("ZenClash/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .redirect(reqwest::redirect::Policy::limited(8));
+        if let NetworkProbeRoute::MihomoHttp { host, port } = &route {
+            if host.trim().is_empty() || *port == 0 {
+                return Err(NetworkProbeError::InvalidTarget(
+                    "Mihomo HTTP 代理地址或端口无效".into(),
+                ));
+            }
+            let proxy_url = format_http_proxy_url(host, *port);
+            builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
+        }
+        Ok(Self {
+            route,
+            http: builder.build()?,
+        })
+    }
+
+    /// Fetches IP data and measures all latency targets concurrently.
+    ///
+    /// Provider and per-target failures are preserved in the returned
+    /// snapshot, so one unavailable service does not erase other diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error before sending requests when there are too many or
+    /// invalid targets.
+    pub async fn snapshot(
+        &self,
+        provider: PublicIpProvider,
+        targets: &[NetworkLatencyTarget],
+    ) -> NetworkProbeResult<NetworkProbeSnapshot> {
+        if targets.len() > MAX_LATENCY_TARGETS {
+            return Err(NetworkProbeError::InvalidTarget(format!(
+                "最多支持 {MAX_LATENCY_TARGETS} 个延迟目标"
+            )));
+        }
+        let targets = targets
+            .iter()
+            .map(|target| NetworkLatencyTarget::new(&target.name, &target.url))
+            .collect::<NetworkProbeResult<Vec<_>>>()?;
+        let ip_request = self.fetch_public_ip(provider);
+        let latency_requests = targets
+            .into_iter()
+            .map(|target| self.measure_target(target));
+        let (public_ip, latencies) =
+            tokio::join!(ip_request, futures_util::future::join_all(latency_requests));
+        let (public_ip, public_ip_error) = match public_ip {
+            Ok(info) => (Some(info), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        Ok(NetworkProbeSnapshot {
+            route: self.route.label(),
+            public_ip,
+            public_ip_error,
+            latencies,
+        })
+    }
+
+    /// Measures one validated HTTP(S) target through this service's route.
+    ///
+    /// Transport and HTTP failures are returned inside the result so callers
+    /// can retain the target alongside its diagnostic error.
+    pub async fn measure_target(&self, target: NetworkLatencyTarget) -> NetworkLatencyResult {
+        match NetworkLatencyTarget::new(&target.name, &target.url) {
+            Ok(target) => self.measure_latency(target).await,
+            Err(error) => NetworkLatencyResult {
+                target,
+                latency_ms: None,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+
+    async fn fetch_public_ip(
+        &self,
+        provider: PublicIpProvider,
+    ) -> NetworkProbeResult<PublicIpInfo> {
+        self.fetch_public_ip_from(provider, provider.endpoint())
+            .await
+    }
+
+    async fn fetch_public_ip_from(
+        &self,
+        provider: PublicIpProvider,
+        endpoint: &str,
+    ) -> NetworkProbeResult<PublicIpInfo> {
+        let endpoint = normalize_http_url(endpoint)?;
+        let response = self.http.get(endpoint).send().await?.error_for_status()?;
+        let bytes = read_limited(response, IP_RESPONSE_LIMIT).await?;
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| NetworkProbeError::InvalidResponse(error.to_string()))?;
+        parse_public_ip(provider, &value)
+    }
+
+    async fn measure_latency(&self, target: NetworkLatencyTarget) -> NetworkLatencyResult {
+        let started = Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .get(&target.url)
+                .send()
+                .await?
+                .error_for_status()?;
+            consume_limited(response, LATENCY_RESPONSE_LIMIT).await
+        }
+        .await;
+        match result {
+            Ok(()) => NetworkLatencyResult {
+                target,
+                latency_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                error: None,
+            },
+            Err(error) => NetworkLatencyResult {
+                target,
+                latency_ms: None,
+                error: Some(error.to_string()),
+            },
+        }
+    }
+}
+
+async fn read_limited(response: reqwest::Response, limit: usize) -> NetworkProbeResult<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(NetworkProbeError::ResponseTooLarge {
+            limit_kib: limit / 1024,
+        });
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(NetworkProbeError::ResponseTooLarge {
+                limit_kib: limit / 1024,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn consume_limited(response: reqwest::Response, limit: usize) -> NetworkProbeResult<()> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(NetworkProbeError::ResponseTooLarge {
+            limit_kib: limit / 1024,
+        });
+    }
+    let mut received = 0_usize;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        received = received.saturating_add(chunk.len());
+        if received > limit {
+            return Err(NetworkProbeError::ResponseTooLarge {
+                limit_kib: limit / 1024,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn parse_public_ip(provider: PublicIpProvider, value: &Value) -> NetworkProbeResult<PublicIpInfo> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| NetworkProbeError::InvalidResponse("顶层 JSON 不是对象".into()))?;
+    let string = |key: &str| object.get(key).and_then(Value::as_str).map(str::to_owned);
+    let number = |key: &str| object.get(key).and_then(Value::as_f64);
+    let boolean = |key: &str| object.get(key).and_then(Value::as_bool);
+    let mut info = match provider {
+        PublicIpProvider::IpSb => PublicIpInfo {
+            ip: string("ip").unwrap_or_default(),
+            country: string("country"),
+            country_code: string("country_code"),
+            city: string("city"),
+            asn: parse_asn(object.get("asn")),
+            organization: string("asn_organization"),
+            latitude: number("latitude"),
+            longitude: number("longitude"),
+            ..Default::default()
+        },
+        PublicIpProvider::IpWhoIs => {
+            let connection = object.get("connection").and_then(Value::as_object);
+            let timezone = object.get("timezone").and_then(Value::as_object);
+            PublicIpInfo {
+                ip: string("ip").unwrap_or_default(),
+                country: string("country"),
+                country_code: string("country_code"),
+                region: string("region"),
+                city: string("city"),
+                asn: connection.and_then(|item| parse_asn(item.get("asn"))),
+                organization: nested_string(connection, "org"),
+                isp: nested_string(connection, "isp"),
+                timezone: nested_string(timezone, "id"),
+                latitude: number("latitude"),
+                longitude: number("longitude"),
+                ..Default::default()
+            }
+        }
+        PublicIpProvider::IpApiIs => {
+            let location = object.get("location").and_then(Value::as_object);
+            let asn = object.get("asn").and_then(Value::as_object);
+            PublicIpInfo {
+                ip: string("ip").unwrap_or_default(),
+                country: nested_string(location, "country"),
+                country_code: nested_string(location, "country_code"),
+                region: nested_string(location, "state"),
+                city: nested_string(location, "city"),
+                asn: asn.and_then(|item| parse_asn(item.get("asn"))),
+                organization: nested_string(asn, "org"),
+                is_proxy: boolean("is_proxy"),
+                is_vpn: boolean("is_vpn"),
+                timezone: nested_string(location, "timezone"),
+                latitude: nested_number(location, "latitude"),
+                longitude: nested_number(location, "longitude"),
+                ..Default::default()
+            }
+        }
+    };
+    info.ip = info.ip.trim().to_owned();
+    if info.ip.is_empty() {
+        return Err(NetworkProbeError::InvalidResponse(
+            "响应缺少公网 IP 字段".into(),
+        ));
+    }
+    Ok(info)
+}
+
+fn parse_asn(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_str()?
+                .trim()
+                .trim_start_matches(|character: char| character.eq_ignore_ascii_case(&'a'))
+                .trim_start_matches(|character: char| character.eq_ignore_ascii_case(&'s'))
+                .parse()
+                .ok()
+        })
+    })
+}
+
+fn nested_string(object: Option<&serde_json::Map<String, Value>>, key: &str) -> Option<String> {
+    object?.get(key)?.as_str().map(str::to_owned)
+}
+
+fn nested_number(object: Option<&serde_json::Map<String, Value>>, key: &str) -> Option<f64> {
+    object?.get(key)?.as_f64()
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use super::*;
+
+    async fn serve_once(status: &str, body: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_owned();
+        let body = body.to_owned();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{address}/probe")
+    }
+
+    #[test]
+    fn normalizes_targets_and_rejects_credentials() {
+        let target = NetworkLatencyTarget::new(" Example ", "example.com/health").unwrap();
+        assert_eq!(target.name, "Example");
+        assert_eq!(target.url, "https://example.com/health");
+        assert!(NetworkLatencyTarget::new("private", "https://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn proxy_url_brackets_ipv6_hosts_for_mihomo_route() {
+        assert_eq!(format_http_proxy_url("::1", 7890), "http://[::1]:7890");
+        assert_eq!(format_http_proxy_url("[::1]", 7890), "http://[::1]:7890");
+        assert_eq!(
+            format_http_proxy_url("2001:db8::1", 7890),
+            "http://[2001:db8::1]:7890"
+        );
+        assert_eq!(
+            format_http_proxy_url("127.0.0.1", 7890),
+            "http://127.0.0.1:7890"
+        );
+        let route = NetworkProbeRoute::MihomoHttp {
+            host: "::1".into(),
+            port: 7890,
+        };
+        assert_eq!(route.http_proxy_url().as_deref(), Some("http://[::1]:7890"));
+        assert!(NetworkProbeService::new(route).is_ok());
+        assert_eq!(NetworkProbeRoute::Direct.http_proxy_url(), None);
+    }
+
+    #[test]
+    fn parses_each_supported_provider_shape() {
+        let sb = serde_json::json!({
+            "ip": "203.0.113.4", "country": "Example", "country_code": "EX",
+            "asn": "AS64500", "asn_organization": "Example Net"
+        });
+        let who = serde_json::json!({
+            "ip": "2001:db8::1", "region": "North", "connection": {
+                "asn": 64501, "org": "Example Org", "isp": "Example ISP"
+            }, "timezone": {"id": "Etc/UTC"}
+        });
+        let api = serde_json::json!({
+            "ip": "198.51.100.8", "is_proxy": true, "is_vpn": false,
+            "location": {"country": "Example", "latitude": 1.5},
+            "asn": {"asn": 64502, "org": "Third Org"}
+        });
+
+        assert_eq!(
+            parse_public_ip(PublicIpProvider::IpSb, &sb).unwrap().asn,
+            Some(64500)
+        );
+        assert_eq!(
+            parse_public_ip(PublicIpProvider::IpWhoIs, &who)
+                .unwrap()
+                .isp
+                .as_deref(),
+            Some("Example ISP")
+        );
+        assert_eq!(
+            parse_public_ip(PublicIpProvider::IpApiIs, &api)
+                .unwrap()
+                .is_proxy,
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn uses_real_http_for_ip_and_latency() {
+        let ip_url = serve_once(
+            "200 OK",
+            r#"{"ip":"203.0.113.9","country":"Example","asn":64500}"#,
+        )
+        .await;
+        let latency_url = serve_once("204 No Content", "").await;
+        let service = NetworkProbeService::with_timeouts(
+            NetworkProbeRoute::Direct,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        let info = service
+            .fetch_public_ip_from(PublicIpProvider::IpSb, &ip_url)
+            .await
+            .unwrap();
+        let latency = service
+            .measure_latency(NetworkLatencyTarget::new("local", latency_url).unwrap())
+            .await;
+
+        assert_eq!(info.ip, "203.0.113.9");
+        assert!(latency.error.is_none());
+        assert!(latency.latency_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn reports_oversized_ip_response() {
+        let body = "x".repeat(IP_RESPONSE_LIMIT + 1);
+        let url = serve_once("200 OK", &body).await;
+        let service = NetworkProbeService::new(NetworkProbeRoute::Direct).unwrap();
+
+        let error = service
+            .fetch_public_ip_from(PublicIpProvider::IpSb, &url)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, NetworkProbeError::ResponseTooLarge { .. }));
+    }
+
+    #[tokio::test]
+    async fn ambient_proxy_fixture_child() {
+        let Ok(target) = std::env::var("ZENCLASH_PROBE_FIXTURE_TARGET") else {
+            return;
+        };
+        let route = match std::env::var("ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT") {
+            Ok(port) => NetworkProbeRoute::MihomoHttp {
+                host: "127.0.0.1".into(),
+                port: port.parse().unwrap(),
+            },
+            Err(_) => NetworkProbeRoute::Direct,
+        };
+        let service = NetworkProbeService::with_timeouts(
+            route,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let result = service
+            .measure_latency(NetworkLatencyTarget::new("fixture", target).unwrap())
+            .await;
+        assert!(
+            result.error.is_none(),
+            "local probe failed: {:?}",
+            result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_and_explicit_mihomo_probes_ignore_ambient_proxy_settings() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn responder() -> (u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let count = hits.clone();
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = [0; 2048];
+                    let received = stream.read(&mut bytes).await.unwrap();
+                    assert!(received > 0, "fixture received an empty request");
+                    count.fetch_add(1, Ordering::SeqCst);
+                    stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                }
+            });
+            (port, hits, task)
+        }
+
+        let (target_port, target_hits, target_task) = responder().await;
+        let (ambient_port, ambient_hits, ambient_task) = responder().await;
+        let (explicit_port, explicit_hits, explicit_task) = responder().await;
+        for explicit in [false, true] {
+            let output = tokio::task::spawn_blocking(move || {
+                let fixture = format!(
+                    "{}::ambient_proxy_fixture_child",
+                    module_path!().trim_start_matches("zenclash_core::")
+                );
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", &fixture, "--nocapture"]).env(
+                    "ZENCLASH_PROBE_FIXTURE_TARGET",
+                    format!("http://127.0.0.1:{target_port}/fixture"),
+                );
+                for name in [
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                ] {
+                    command.env(name, format!("http://127.0.0.1:{ambient_port}"));
+                }
+                command.env("NO_PROXY", "").env("no_proxy", "");
+                if explicit {
+                    command.env(
+                        "ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT",
+                        explicit_port.to_string(),
+                    );
+                } else {
+                    command.env_remove("ZENCLASH_PROBE_FIXTURE_EXPLICIT_PORT");
+                }
+                command.output().unwrap()
+            })
+            .await
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        target_task.abort();
+        ambient_task.abort();
+        explicit_task.abort();
+        assert_eq!(
+            target_hits.load(Ordering::SeqCst),
+            1,
+            "Direct must reach the target itself"
+        );
+        assert_eq!(
+            explicit_hits.load(Ordering::SeqCst),
+            1,
+            "Mihomo must use its explicit route"
+        );
+        assert_eq!(
+            ambient_hits.load(Ordering::SeqCst),
+            0,
+            "ambient proxies must not receive diagnostic requests"
+        );
+    }
+}
