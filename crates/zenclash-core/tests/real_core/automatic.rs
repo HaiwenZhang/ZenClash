@@ -1,14 +1,12 @@
 //! Automatic lifecycle behavior against an isolated real Mihomo, without changing host capture.
 
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use zenclash_core::{
     ControlledConfigStore, CoreKind, CoreLaunchConfig, CoreLifecyclePhase, CoreMaintenanceIntent,
     CoreSession, ManagedCoreProcess, MihomoClient, TrafficCaptureSession,
 };
+
+use crate::harness::{short_test_root, wait_for_real_runtime_mode};
 
 struct Fixture {
     root: PathBuf,
@@ -19,18 +17,28 @@ struct Fixture {
     capture: TrafficCaptureSession,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // Release the process-wide single-core execution lock before the test's
+        // serial mutex unwinds, even when an assertion fails mid-test.
+        self.session.request_shutdown();
+        if let Err(error) = self.process.stop() {
+            eprintln!("real automatic child cleanup failed: {error}");
+            return;
+        }
+        if self.root.exists()
+            && let Err(error) = std::fs::remove_dir_all(&self.root)
+        {
+            eprintln!("real automatic directory cleanup failed: {error}");
+        }
+    }
+}
+
 impl Fixture {
     async fn start(name: &str) -> Self {
         let binary =
             std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("set ZENCLASH_MIHOMO_BINARY");
-        let root = std::env::temp_dir().join(format!(
-            "zenclash-real-automatic-{name}-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = short_test_root(&format!("zc-auto-{name}"));
         std::fs::create_dir_all(&root).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -177,16 +185,8 @@ async fn changed_source_restarts_once_and_rejected_source_preserves_the_live_pro
     );
     let after = fixture.process.snapshot().pid;
     assert_ne!(before, after);
-    assert_eq!(
-        fixture
-            .session
-            .client()
-            .runtime_config()
-            .await
-            .unwrap()
-            .mode,
-        "direct"
-    );
+    let restarted = wait_for_real_runtime_mode(fixture.session.client(), "direct").await;
+    assert_eq!(restarted.mode, "direct");
     assert_eq!(
         fixture
             .store
@@ -229,4 +229,48 @@ async fn changed_source_restarts_once_and_rejected_source_preserves_the_live_pro
         "direct"
     );
     fixture.finish().await;
+}
+
+#[tokio::test]
+async fn runtime_mode_readiness_waits_for_initial_configuration_after_version_probe() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use zenclash_core::MihomoEndpoint;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = MihomoClient::new(MihomoEndpoint::new(
+        format!("http://{}", listener.local_addr().unwrap()),
+        "",
+    ))
+    .unwrap();
+    let server = tokio::spawn(async move {
+        for (path, body) in [
+            ("/version", r#"{"version":"starting","meta":true}"#),
+            ("/configs", r#"{"mode":"rule"}"#),
+            ("/configs", r#"{"mode":"direct"}"#),
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(format!("GET {path} ").as_bytes()));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    client.version().await.unwrap();
+    let config = wait_for_real_runtime_mode(&client, "direct").await;
+    assert_eq!(config.mode, "direct");
+    server.await.unwrap();
 }

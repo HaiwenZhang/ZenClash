@@ -6,6 +6,8 @@ use zenclash_core::{
     ControlledConfigStore, CoreLaunchConfig, ManagedCoreProcess, MihomoClient, ServiceRuntimeBundle,
 };
 
+use crate::harness::{short_test_root, wait_for_real_proxy_groups};
+
 struct RecoveryFixture {
     root: PathBuf,
     process: Option<Arc<ManagedCoreProcess>>,
@@ -36,14 +38,7 @@ async fn recover_with_real_mihomo(input: ProviderInput) {
     let _serial = crate::real_core_lock().await;
     let source_binary = std::env::var_os("ZENCLASH_MIHOMO_BINARY")
         .expect("set ZENCLASH_MIHOMO_BINARY to an ordinary real Mihomo executable");
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "zenclash-real-local-recovery-{}-{nonce}",
-        std::process::id()
-    ));
+    let root = short_test_root("zc-rec");
     std::fs::create_dir(&root).unwrap();
     let mut fixture = RecoveryFixture {
         root: root.clone(),
@@ -153,10 +148,14 @@ async fn recover_with_real_mihomo(input: ProviderInput) {
         assert_eq!(std::fs::read(&geoip).unwrap(), b"held geoip bytes");
         assert_eq!(std::fs::read(&geosite).unwrap(), b"held geosite bytes");
         let client = MihomoClient::from_process(process.clone()).unwrap();
+        wait_for_real_proxy_groups(&client, &["recovered"]).await;
         let selected = client.proxy_group_selection("recovered").await;
         let before = process.snapshot().pid;
         let restarted = process.restart_and_wait(Duration::from_secs(10)).await;
         let after = process.snapshot().pid;
+        if restarted.is_ok() {
+            wait_for_real_proxy_groups(&client, &["recovered"]).await;
+        }
         let selected_after_restart = client.proxy_group_selection("recovered").await;
         let alternate = bundle
             .materialize_local_runtime(&store, Some(process.launch_config().config_file.clone()))
