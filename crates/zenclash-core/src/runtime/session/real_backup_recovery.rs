@@ -125,7 +125,23 @@ async fn ordinary_local_backup_recovers_held_provider_after_original_sources_are
     let restored = session
         .restore_backup_snapshot(&store, &snapshot, &admission)
         .await;
-    let selected = session.client().proxy_group_selection("recovered").await;
+    let selected = if restored.is_ok() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match session.client().proxy_group_selection("recovered").await {
+                    Ok(selected) => return Ok(selected),
+                    Err(MihomoError::Api { status: 404, .. }) => {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .expect("restarted real Mihomo proxy group did not become ready")
+    } else {
+        session.client().proxy_group_selection("recovered").await
+    };
     let restored_running = session.snapshot().running;
     let retained_pid = process.snapshot().pid;
     let retained_cache = store.cached_runtime_payload().unwrap();

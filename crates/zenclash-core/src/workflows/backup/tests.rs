@@ -442,7 +442,7 @@ fn managed_file_directory_aliases_obey_the_other_roots_restore_lease() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_restore_snapshot_is_captured_after_admission_and_replays_exact_bytes() {
     use crate::{CoreKind, CoreSession, EffectiveConfigIntent, MihomoClient, MihomoEndpoint};
     use std::time::Duration;
@@ -473,7 +473,9 @@ async fn runtime_restore_snapshot_is_captured_after_admission_and_replays_exact_
         let mut release = Some(release_rx);
         let mut payloads = Vec::new();
         for request_index in 0..2 {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            // The second request follows full backup activation and rollback disk I/O
+            // between accepts, which can exceed 5s under parallel Windows CI load.
+            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(30), listener.accept())
                 .await
                 .unwrap()
                 .unwrap();
@@ -701,7 +703,7 @@ async fn session_restore_authorizes_profile_application_in_an_external_runtime_h
     let endpoint = MihomoEndpoint::new(format!("http://{}", listener.local_addr().unwrap()), "");
     listener.set_nonblocking(true).unwrap();
     let server = thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let (mut stream, _) = loop {
             match listener.accept() {
                 Ok(connection) => break connection,

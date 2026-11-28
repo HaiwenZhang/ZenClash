@@ -2,7 +2,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, UdpSocket},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -116,6 +119,60 @@ pub(crate) async fn wait_for_real_proxy_groups(
     })
     .await
     .unwrap_or_else(|_| panic!("real Mihomo proxy groups did not become ready: expected {expected:?}, last observed {observed:?}"))
+}
+
+pub(crate) fn short_test_root(prefix: &str) -> PathBuf {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    // macOS's per-user temp directory sits under symlinked `/var` and can exceed
+    // the Unix domain socket path limit when combined with the IPC socket name.
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    base.join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+pub(crate) struct StopProcessOnDrop(pub(crate) Arc<ManagedCoreProcess>);
+
+impl Drop for StopProcessOnDrop {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.stop() {
+            eprintln!("real core process cleanup failed: {error}");
+        }
+    }
+}
+
+pub(crate) async fn wait_for_real_runtime_mode(
+    client: &MihomoClient,
+    expected_mode: &str,
+) -> RuntimeConfig {
+    // Mihomo starts its controller before applying the initial configuration.
+    // /version readiness can therefore precede /configs reflecting the startup mode.
+    let mut observed_mode = None;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let config = client
+                .runtime_config()
+                .await
+                .expect("read real Mihomo runtime config");
+            if config.mode.eq_ignore_ascii_case(expected_mode) {
+                return config;
+            }
+            observed_mode = Some(config.mode);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "real Mihomo runtime mode did not become ready: expected {expected_mode:?}, last observed {observed_mode:?}"
+        )
+    })
 }
 
 pub(crate) async fn wait_for_real_mixed_listener(

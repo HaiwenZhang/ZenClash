@@ -21,7 +21,8 @@ use crate::{
         verify_real_authorized_subscription, verify_real_ruleset_conversion, verify_runtime_api,
     },
     harness::{
-        IntegrationInputs, reserve_loopback_port, start_mihomo, wait_for_real_mixed_listener,
+        IntegrationInputs, StopProcessOnDrop, reserve_loopback_port, short_test_root, start_mihomo,
+        wait_for_real_mixed_listener, wait_for_real_proxy_groups,
     },
     proxies_and_rules::{
         verify_catalog_apis, verify_real_direct_proxy_delay, verify_real_proxy_operations,
@@ -35,7 +36,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     let _serial = crate::real_core_lock().await;
     let binary =
         PathBuf::from(std::env::var_os("ZENCLASH_MIHOMO_BINARY").expect("real kernel binary"));
-    let root = std::env::temp_dir().join(format!("zenclash-real-ipc-{}", std::process::id()));
+    let root = short_test_root("zc-ipc");
     fs::create_dir_all(&root).unwrap();
     let profile = root.join("profile.yaml");
     fs::write(&profile, "mixed-port: 0\nexternal-controller: ''\nmode: rule\nlog-level: debug\ndns:\n  enable: false\nproxies: []\nproxy-groups:\n  - name: test group\n    type: select\n    proxies: [DIRECT, REJECT]\nrules: ['MATCH,DIRECT']\n").unwrap();
@@ -46,6 +47,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     let process = ManagedCoreProcess::spawn_isolated_for_test(launch).unwrap();
     #[cfg(not(feature = "test-support"))]
     let process = ManagedCoreProcess::spawn(launch).unwrap();
+    let _stop_guard = StopProcessOnDrop(process.clone());
     process
         .wait_until_ready(Duration::from_secs(20))
         .await
@@ -60,6 +62,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
             result.expect("concurrent IPC requests must wait for an available pipe instance");
         }
     }
+    wait_for_real_proxy_groups(&client, &["test group"]).await;
     assert!(!client.proxy_catalog().await.unwrap().groups().is_empty());
     client.change_proxy("test group", "REJECT").await.unwrap();
     assert_eq!(
@@ -127,6 +130,7 @@ async fn managed_ipc_carries_http_and_all_realtime_streams_across_restart() {
     process.stop().unwrap();
     assert!(client.version().await.is_err());
     drop(client);
+    drop(_stop_guard);
     drop(process);
     tokio::time::sleep(Duration::from_millis(100)).await;
     fs::remove_dir_all(root).unwrap();
@@ -143,6 +147,7 @@ async fn drives_the_supplied_profile_through_a_real_mihomo_process() {
     verify_real_ruleset_conversion(&inputs);
     verify_real_listener_conflict_fallback(&inputs).await;
     let process = start_mihomo(&inputs).await;
+    let _stop_guard = StopProcessOnDrop(process.clone());
     let client = MihomoClient::from_process(process.clone())
         .expect("real client")
         .with_config_validator(process.config_validator())
